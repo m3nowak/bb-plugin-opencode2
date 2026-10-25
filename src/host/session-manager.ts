@@ -300,6 +300,7 @@ export async function registerSession(session: SessionState) {
     .rememberSessionRegistration(session.bbThreadId, {
       providerThreadId: session.providerThreadId,
       cwd: session.cwd,
+      connectionId: openCodeServer.connectionId(),
       usage: { ...session.usage },
     })
     .catch((error) => {

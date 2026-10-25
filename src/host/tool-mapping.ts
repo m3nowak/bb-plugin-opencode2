@@ -386,7 +386,7 @@ export function toolRow(name: string, rawInput: unknown, cwd: string) {
         label:
           [agent, description].filter(Boolean).join(": ") ||
           "OpenCode subagent",
-        background: false,
+        background: input.background === true,
       },
     };
   }

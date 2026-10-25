@@ -2,7 +2,10 @@
 import { fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { opencodeSettingsRpcContract } from "../src/settings-contract.ts";
+import {
+  modelSettingsSchema,
+  opencodeSettingsRpcContract,
+} from "../src/settings-contract.ts";
 
 const mountedSlots: Array<{ lifecycle: { unmount(): void } }> = [];
 
@@ -11,6 +14,54 @@ afterEach(() => {
 });
 
 describe("OpenCode settings", () => {
+  it("shows the selected instance and tests the connection without reading a password", async () => {
+    const app = await loadPluginApp(() => import("../src/app.tsx"));
+    const getStatus = vi.fn(async () => ({
+      hosts: [
+        {
+          hostId: "local",
+          hostName: "laptop",
+          status: {
+            status: "ready" as const,
+            statusMessage: null,
+            installedVersion: "2.0.32",
+            latestVersion: null,
+            minimumSupportedVersion: "2.0.26",
+            loginCommand: "opencode2 auth login",
+            modelCount: 1,
+            connectionMode: "custom" as const,
+            serverUrl: "http://127.0.0.1:4095",
+          },
+        },
+      ],
+    }));
+    const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
+      app.settingsSections[0]!,
+      {},
+      {
+        rpc: {
+          getSettings: async () => ({
+            providerEnabled: true,
+            enabledModels: null,
+            disableSubagents: true,
+            hideBbToolsOutsideBb: true,
+          }),
+          listModels: async () => ({ models: [] }),
+          getNewThreadAgent: async () => ({ agent: null }),
+          setNewThreadAgent: async ({ agent }) => ({ agent }),
+          saveSettings: async (settings) => modelSettingsSchema.parse(settings),
+          getStatus,
+        },
+      },
+    );
+    mountedSlots.push(slot);
+    expect(
+      await slot.findByText("Existing instance: http://127.0.0.1:4095"),
+    ).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Test connection" }));
+    await waitFor(() => expect(getStatus).toHaveBeenCalledTimes(2));
+  });
+
   it("loads models and persists provider changes", async () => {
     const app = await loadPluginApp(() => import("../src/app.tsx"));
     const registration = app.settingsSections[0];

@@ -29,6 +29,11 @@ export class OpenCodeInteractions {
   constructor(
     private readonly request: RequestOpenCode,
     private readonly emitTimeline: typeof emit = emit,
+    private readonly requestInteraction: (
+      method: string,
+      params: RecordValue,
+      options?: { signal?: AbortSignal },
+    ) => Promise<RecordValue> = requestRuntime,
   ) {}
 
   /**
@@ -87,26 +92,28 @@ export class OpenCodeInteractions {
       availableDecisions: ["allow_once", "allow_for_session", "deny"],
     };
     try {
-      const result = await requestRuntime(
+      const result = await this.requestInteraction(
         "interaction/request",
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
           turnId: active.providerTurnId,
+          providerNativeIds: true,
           payload,
         },
         { signal: active.abortController.signal },
       );
-      const decision = result?.resolution?.decision;
+      const decision = result?.decision;
       const reply =
         session.active === active
           ? approvalPermissionReply(decision)
           : "reject";
       await this.replyPermission(sessionId, requestId, reply);
-    } catch {
+    } catch (error) {
       await this.replyPermission(sessionId, requestId, "reject").catch(
         () => {},
       );
+      throw error;
     }
   }
 
@@ -258,19 +265,28 @@ export class OpenCodeInteractions {
     });
     let resolution: RecordValue | undefined;
     try {
-      const result = await requestRuntime(
+      resolution = await this.requestInteraction(
         "interaction/request",
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
           turnId: active.providerTurnId,
+          providerNativeIds: true,
           payload: { kind: "user_question", questions },
         },
         { signal: active.abortController.signal },
       );
-      resolution = result?.resolution;
-    } catch {
-      resolution = undefined;
+    } catch (error) {
+      if (session.active !== active || !active.opened.has(callId)) return;
+      await this.cancelQuestionForm(session, formId);
+      this.closeQuestion(
+        session,
+        active,
+        callId,
+        "failed",
+        `Could not request an answer from BB: ${errorMessage(error)}`,
+      );
+      return;
     }
     if (session.active !== active || !active.opened.has(callId)) return;
     const answers: RecordValue | undefined =

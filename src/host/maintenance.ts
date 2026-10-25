@@ -14,11 +14,12 @@ import {
 import type { ModelSettings } from "../settings-contract.ts";
 import { openCodeServer } from "./opencode-server.ts";
 import { errorMessage } from "./types.ts";
+import { MIN_OPENCODE_VERSION } from "../connection-settings.ts";
+export { MIN_OPENCODE_VERSION } from "../connection-settings.ts";
 
 export const OPENCODE_EXECUTABLE = "opencode2";
 export const OPENCODE_NPM_PACKAGE = "@opencode/cli";
 /** The oldest OpenCode whose API this bridge was verified against. */
-export const MIN_OPENCODE_VERSION = "2.0.26";
 export const OPENCODE_LOGIN_COMMAND = "opencode2 auth login";
 
 const LATEST_VERSION_TTL_MS = 60 * 60 * 1000;
@@ -128,15 +129,29 @@ export async function providerHealth(
   settings: ModelSettings,
   cwd: string,
 ): Promise<ProviderHealth> {
+  const connection = await openCodeServer.readConnectionSettings();
   const base = {
     accountEmail: null,
     planLabel: null,
     minimumSupportedVersion: MIN_OPENCODE_VERSION,
-    canInstall: true,
+    canInstall: connection.mode === "auto",
     canUpdate: false,
     loginCommand: OPENCODE_LOGIN_COMMAND,
   };
-  const installedVersion = await readCliVersion(OPENCODE_EXECUTABLE);
+  let installedVersion: string | null;
+  try {
+    installedVersion =
+      connection.mode === "custom"
+        ? await openCodeServer.configuredServerVersion()
+        : await readCliVersion(OPENCODE_EXECUTABLE);
+  } catch (error) {
+    return {
+      ...base,
+      status: "unknown",
+      installedVersion: null,
+      statusMessage: errorMessage(error),
+    };
+  }
   // A disabled provider reports not_installed so BB hides it everywhere.
   if (!settings.providerEnabled || installedVersion === null)
     return {
@@ -147,7 +162,8 @@ export async function providerHealth(
         : "OpenCode v2 is disabled in the plugin settings.",
       installedVersion: null,
     };
-  const latest = await latestVersion(false);
+  const latest =
+    connection.mode === "custom" ? null : await latestVersion(false);
   const canUpdate =
     latest !== null && compareVersions(latest, installedVersion) > 0;
   if (!isSupportedVersion(installedVersion))
@@ -165,7 +181,10 @@ export async function providerHealth(
       return {
         ...base,
         status: "unauthenticated",
-        statusMessage: `OpenCode has no usable models. Run \`${OPENCODE_LOGIN_COMMAND}\` to connect a model provider.`,
+        statusMessage:
+          connection.mode === "custom"
+            ? "The configured OpenCode instance has no usable models. Connect a model provider on that instance."
+            : `OpenCode has no usable models. Run \`${OPENCODE_LOGIN_COMMAND}\` to connect a model provider.`,
         installedVersion,
         canInstall: false,
         canUpdate,

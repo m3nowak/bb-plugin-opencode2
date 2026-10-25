@@ -3,7 +3,18 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { withoutBridgeRuntimeEnv } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  experimental_compareVersions as compareVersions,
+  withoutBridgeRuntimeEnv,
+} from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  connectionIdentity,
+  connectionSettingsSchema,
+  connectionUrl,
+  DEFAULT_CONNECTION_SETTINGS,
+  MIN_OPENCODE_VERSION,
+  type ConnectionSettings,
+} from "../connection-settings.ts";
 import {
   DEFAULT_MODEL_SETTINGS,
   normalizeModelSettings,
@@ -16,7 +27,10 @@ import {
   revertTargetRetainingThrough,
   type CheckpointMessage,
 } from "./opencode-requests.ts";
-import { OpenCodeEventRouter } from "./opencode-event-router.ts";
+import {
+  hasPendingWork,
+  OpenCodeEventRouter,
+} from "./opencode-event-router.ts";
 import { writeJsonFileAtomic } from "./persistence.ts";
 import {
   errorMessage,
@@ -30,6 +44,7 @@ import {
 type RecordValue = OpenCodeRecord;
 
 const SETTINGS_FILE = "opencode2-model-settings.json";
+const CONNECTION_FILE = "opencode2-connection-secret.json";
 const MCP_REGISTRY_FILE = "opencode2-mcp-registry.json";
 const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 
@@ -62,6 +77,7 @@ export type McpBridgeRegistration = { serverName: string; cwd: string };
 export type SessionBridgeRegistration = {
   providerThreadId: string;
   cwd: string;
+  connectionId?: string;
   usage: {
     input: number;
     output: number;
@@ -97,6 +113,9 @@ export function parseOpenCodeServiceUrl(output: string): string {
 export class OpenCodeServer {
   private baseUrl?: string;
   private password?: string;
+  private connection?: ConnectionSettings;
+  private connectionPinned = false;
+  private serverVersion?: string;
   private starting?: Promise<void>;
   private dataDir?: string;
   private eventAbortController?: AbortController;
@@ -143,6 +162,102 @@ export class OpenCodeServer {
     const path = this.settingsPath();
     if (!path) throw new Error("OpenCode host data directory is unavailable");
     await writeJsonFileAtomic(path, settings);
+  }
+
+  async readConnectionSettings(): Promise<ConnectionSettings> {
+    if (!this.dataDir) return { ...DEFAULT_CONNECTION_SETTINGS };
+    for (const path of [
+      join(this.dataDir, CONNECTION_FILE),
+      join(dirname(this.dataDir), "host-data", CONNECTION_FILE),
+    ]) {
+      let text: string;
+      try {
+        text = await readFile(path, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw new Error(
+          "Cannot read the private OpenCode connection configuration",
+        );
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        throw new Error("Invalid private OpenCode connection configuration");
+      }
+      const parsed = connectionSettingsSchema.safeParse(value);
+      if (!parsed.success)
+        throw new Error(
+          "Invalid OpenCode connection configuration; check the plugin settings",
+        );
+      return parsed.data;
+    }
+    return { ...DEFAULT_CONNECTION_SETTINGS };
+  }
+
+  async writeConnectionSettings(settings: ConnectionSettings) {
+    if (!this.dataDir)
+      throw new Error("OpenCode host data directory is unavailable");
+    const parsed = connectionSettingsSchema.safeParse(settings);
+    if (!parsed.success)
+      throw new Error("Invalid OpenCode connection settings");
+    await writeJsonFileAtomic(join(this.dataDir, CONNECTION_FILE), parsed.data);
+  }
+
+  connectionId(): string {
+    return connectionIdentity(this.connection ?? DEFAULT_CONNECTION_SETTINGS);
+  }
+
+  async assertConfiguredConnection(expected: string, bbThreadId?: string) {
+    // Settings edits must not disconnect or retarget an already-running turn.
+    if (bbThreadId && sessions.get(bbThreadId)?.active && this.baseUrl) return;
+    const configured = await this.readConnectionSettings();
+    if (connectionIdentity(configured) !== expected)
+      throw new Error(
+        "OpenCode connection settings have not reached this execution machine. Reload the plugin; no automatic fallback was used.",
+      );
+    await this.start();
+    if (this.connectionId() !== expected)
+      throw new Error(
+        "OpenCode connection settings changed. Reload the plugin before starting another turn.",
+      );
+  }
+
+  async assertSessionConnection(bbThreadId: string, providerThreadId: string) {
+    await this.start();
+    const previous = await this.withSessionRegistryLock(async () => {
+      await this.loadSessionRegistry();
+      return (
+        this.sessionRegistry.get(bbThreadId) ??
+        [...this.sessionRegistry.values()].find(
+          (entry) => entry.providerThreadId === providerThreadId,
+        )
+      );
+    });
+    if (
+      previous?.providerThreadId === providerThreadId &&
+      (previous.connectionId ?? "auto") !== this.connectionId()
+    ) {
+      throw new Error(
+        "This thread belongs to a different OpenCode connection. Start a new BB thread or restore the previous connection settings.",
+      );
+    }
+  }
+
+  async connectionStatus() {
+    const settings = await this.readConnectionSettings();
+    return {
+      connectionMode: settings.mode,
+      serverUrl:
+        settings.mode === "custom" ? connectionUrl(settings.url) : this.baseUrl,
+    };
+  }
+
+  async configuredServerVersion(): Promise<string> {
+    await this.start();
+    if (!this.serverVersion)
+      throw new Error("OpenCode server version is unavailable");
+    return this.serverVersion;
   }
 
   // Tracks per-session MCP bridges so discard can remove OpenCode's
@@ -294,6 +409,9 @@ export class OpenCodeServer {
             this.sessionRegistry.set(key, {
               providerThreadId: record.providerThreadId,
               cwd: record.cwd,
+              ...(typeof record.connectionId === "string"
+                ? { connectionId: record.connectionId }
+                : {}),
               usage: {
                 input: usageNumber(usage.input),
                 output: usageNumber(usage.output),
@@ -320,6 +438,7 @@ export class OpenCodeServer {
     bbThreadId: string,
     entry: SessionBridgeRegistration,
   ) {
+    this.connectionPinned = true;
     await this.withSessionRegistryLock(async () => {
       await this.loadSessionRegistry();
       const previous = this.sessionRegistry.get(bbThreadId);
@@ -358,13 +477,8 @@ export class OpenCodeServer {
   }
 
   async start() {
-    if (this.baseUrl) return;
-    if (this.starting) {
-      await this.starting;
-      return;
-    }
-    const generation = ++this.connectionGeneration;
-    this.starting = this.connect(generation);
+    if (this.starting) return this.starting;
+    this.starting = this.ensureConnection();
     try {
       await this.starting;
     } finally {
@@ -372,17 +486,108 @@ export class OpenCodeServer {
     }
   }
 
-  private async connect(generation: number) {
+  private async ensureConnection() {
+    const desired = await this.readConnectionSettings();
+    if (this.baseUrl) {
+      if (JSON.stringify(desired) === JSON.stringify(this.connection)) return;
+      if ([...sessions.values()].some((session) => session.active)) return;
+      if (sessions.size)
+        throw new Error(
+          "OpenCode connection settings changed. Reload the plugin before starting another turn.",
+        );
+      // shutdownSessions clears the live map before removing its old MCP
+      // registrations. Those cleanup requests still belong to this server.
+      if (this.connectionPinned) return;
+      await this.stop();
+      this.password = undefined;
+      this.modelCatalogs.clear();
+    }
+    const generation = ++this.connectionGeneration;
+    await this.connect(generation, desired);
+  }
+
+  private async connect(generation: number, connection: ConnectionSettings) {
     // OpenCode runs one shared background service for everything. Connect to
     // it instead of spawning a private server: per-worker servers would hold
     // disjoint session state, so sessions created on one worker could not be
     // resumed from another.
-    const status = await this.cli(["service", "start"]);
-    const url = parseOpenCodeServiceUrl(status);
-    await this.servicePassword();
+    let url: string;
+    let version: string | undefined;
+    if (connection.mode === "custom") {
+      url = connectionUrl(connection.url);
+      if (!connection.password)
+        throw new Error(
+          "The configured OpenCode instance requires a password in the plugin settings (available only on the BB server machine)",
+        );
+      let response: Response;
+      try {
+        response = await fetch(`${url}/api/info`, {
+          headers: {
+            Authorization: this.basicAuth(
+              connection.username,
+              connection.password,
+            ),
+          },
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new Error(
+          "Cannot connect to the configured OpenCode instance; check its URL, TLS certificate, and availability",
+        );
+      }
+      if (!response.ok)
+        throw new Error(
+          response.status === 401 || response.status === 403
+            ? "The configured OpenCode instance rejected authentication; check the username and password"
+            : `The configured OpenCode instance returned HTTP ${response.status}`,
+        );
+      const info = inputRecord(await response.json().catch(() => ({})));
+      version = stringValue(info.version);
+      if (
+        !version ||
+        !/^2\./.test(version) ||
+        compareVersions(version, MIN_OPENCODE_VERSION) < 0
+      )
+        throw new Error(
+          `The configured instance must run OpenCode v2 ${MIN_OPENCODE_VERSION} or newer`,
+        );
+      // Some deployments expose /api/info publicly. Check a protected API as
+      // well before accepting the supplied credentials or starting the stream.
+      let authenticated: Response;
+      try {
+        authenticated = await fetch(`${url}/api/session/active`, {
+          headers: {
+            Authorization: this.basicAuth(
+              connection.username,
+              connection.password,
+            ),
+          },
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new Error(
+          "Cannot verify authentication on the configured OpenCode instance",
+        );
+      }
+      await authenticated.body?.cancel();
+      if (!authenticated.ok)
+        throw new Error(
+          authenticated.status === 401 || authenticated.status === 403
+            ? "The configured OpenCode instance rejected authentication; check the username and password"
+            : `The configured OpenCode instance returned HTTP ${authenticated.status}`,
+        );
+    } else {
+      const status = await this.cli(["service", "start"]);
+      url = parseOpenCodeServiceUrl(status);
+      await this.servicePassword();
+    }
     if (generation !== this.connectionGeneration) {
       throw new Error("OpenCode connection was stopped during startup");
     }
+    this.connection = connection;
+    this.serverVersion = version;
     this.baseUrl = url;
     this.eventAbortController?.abort();
     this.eventAbortController = new AbortController();
@@ -430,19 +635,31 @@ export class OpenCodeServer {
   }
 
   private headers() {
+    if (this.connection?.mode === "custom")
+      return {
+        Authorization: this.basicAuth(
+          this.connection.username,
+          this.connection.password,
+        ),
+      };
     const password = process.env.OPENCODE_SERVER_PASSWORD ?? this.password;
     if (!password)
       throw new Error("OpenCode service credentials are unavailable");
     const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
     return {
-      Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+      Authorization: this.basicAuth(username, password),
     };
+  }
+
+  private basicAuth(username: string, password: string) {
+    return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
   }
 
   async request(path: string, init: RequestInit = {}): Promise<RecordValue> {
     await this.start();
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
+      redirect: "error",
       headers: {
         ...this.headers(),
         "content-type": "application/json",
@@ -450,6 +667,10 @@ export class OpenCodeServer {
       },
       signal: init.signal ?? AbortSignal.timeout(30_000),
     });
+    if (!response.ok && this.connection?.mode === "custom")
+      throw new Error(
+        `OpenCode API ${response.status}: request to the configured instance failed`,
+      );
     if (!response.ok)
       throw new Error(
         `OpenCode API ${response.status}: ${await response.text()}`,
@@ -472,6 +693,7 @@ export class OpenCodeServer {
     cwd: string,
     fresh = false,
   ): Promise<OpenCodeModelCatalog> {
+    await this.start();
     const cached = this.modelCatalogs.get(cwd);
     if (!fresh && cached && Date.now() - cached.at < MODEL_CATALOG_TTL_MS)
       return cached.result;
@@ -787,6 +1009,7 @@ export class OpenCodeServer {
     while (this.baseUrl && !signal.aborted) {
       try {
         const response = await fetch(`${this.baseUrl}/api/event`, {
+          redirect: "error",
           headers: this.headers(),
           signal,
         });
@@ -847,12 +1070,10 @@ export class OpenCodeServer {
     if (candidates.length === 0) return;
     this.reconciling = true;
     try {
-      const running = inputRecord(
-        (await this.request("/api/session/active")).data,
-      );
       for (const session of candidates) {
         const active = session.active;
-        if (!active || session.providerThreadId in running) continue;
+        if (!active) continue;
+        const executionVersion = active.executionVersion;
         const info = inputRecord(
           (
             await this.request(
@@ -860,9 +1081,31 @@ export class OpenCodeServer {
             ).catch((): OpenCodeRecord => ({}))
           ).data,
         );
+        const stopped =
+          info.outcome === "failed" || info.outcome === "interrupted";
+        if (!stopped) await this.eventRouter.reconcileBackgroundWork(session);
         const idle = inputRecord(info.time).idle;
+        const notificationsSettled =
+          stopped ||
+          (!hasPendingWork(active) &&
+            (await this.eventRouter.backgroundNotificationsSettled(
+              session,
+              idle,
+              Date.now() - RECONCILE_SETTLE_MS,
+            )));
+        // Completion notifications can wake the parent during recovery. The
+        // activity snapshot must be newer than the inbox/message snapshots.
+        const running = inputRecord(
+          (await this.request("/api/session/active")).data,
+        );
         if (
           session.active !== active ||
+          active.executionVersion !== executionVersion ||
+          (stopped
+            ? session.providerThreadId in running
+            : this.eventRouter.hasRunningExecution(session, running)) ||
+          (!stopped && hasPendingWork(active)) ||
+          !notificationsSettled ||
           typeof idle !== "number" ||
           idle < active.startedAt ||
           Date.now() - idle < RECONCILE_SETTLE_MS
@@ -908,6 +1151,11 @@ export class OpenCodeServer {
     this.watchdog = undefined;
     this.eventAbortController?.abort();
     this.eventAbortController = undefined;
+    this.modelCatalogs.clear();
+    this.serverVersion = undefined;
+    this.password = undefined;
+    this.connection = undefined;
+    this.connectionPinned = false;
   }
 }
 

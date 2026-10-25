@@ -75,6 +75,31 @@ OpenCode v2 has no API for these, so the provider declares them unsupported.
 
 Open the plugin settings page in BB (Settings → OpenCode v2).
 
+### Existing local OpenCode instance
+
+In Extensions → Plugins → OpenCode v2, set **OpenCode connection** to
+**Existing local instance**, enter the server URL (for example
+`http://127.0.0.1:4095`), username (normally `opencode`), and password.
+Reload the plugin, then use **Test connection** on its settings page.
+
+The password is a BB secret, not a model setting or provider option. The
+execution host receives a private `0600` credential file; the password is
+not distributed to remote execution machines. Only loopback HTTP(S) origins
+are supported because the bridge and OpenCode must share the local filesystem
+and loopback MCP proxy. Custom mode never starts, pairs, or falls back to the
+automatic OpenCode service, and does not follow HTTP redirects.
+
+After changing servers, start new threads. Existing threads remain pinned
+to their original connection; the plugin does not migrate their sessions.
+Active turns keep their connection until they finish. Workers that have opened
+sessions stay on their original server through cleanup; reload the plugin to
+replace them when changing the connection.
+
+**Automatic local service** remains the default and preserves the previous
+service discovery behavior.
+
+### Provider settings
+
 - **Status** shows each connected host's OpenCode version, available updates,
   and model count, with the command to run when something is missing.
 - **Show in the provider picker** enables or hides the provider.

@@ -3,6 +3,14 @@
 // The host bridge talks to OpenCode's local v2 HTTP API. This file only owns
 // provider metadata and keeps process/API details out of the BB server runtime.
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import {
+  DEFAULT_SERVER_URL,
+  connectionUrl,
+  serverUrlSchema,
+  type ConnectionSettings,
+} from "./connection-settings.ts";
 import {
   AGENT_OPTION_ID,
   opencodeHostContract,
@@ -23,6 +31,46 @@ const ALIGN_TIMEOUT_MS = 30_000;
 type AgentSeed = { agent: string; at: number };
 
 export default async function plugin(bb: BbPluginApi) {
+  const connection = bb.settings.define({
+    connectionMode: {
+      type: "select",
+      label: "OpenCode connection",
+      options: ["auto", "custom"],
+      experimental_optionLabels: {
+        auto: "Automatic local service",
+        custom: "Existing local instance",
+      },
+      default: "auto",
+      description:
+        "After changing the server, reload this plugin and start new threads. Active turns keep their existing connection.",
+    },
+    serverUrl: {
+      type: "string",
+      label: "OpenCode server URL",
+      default: DEFAULT_SERVER_URL,
+      experimental_schema: serverUrlSchema,
+      description:
+        "Existing instance on the BB server machine. Only loopback HTTP(S) addresses are supported.",
+    },
+    serverUsername: {
+      type: "string",
+      label: "OpenCode username",
+      default: "opencode",
+      experimental_schema: z
+        .string()
+        .min(1)
+        .max(256)
+        .regex(/^[^:\r\n]+$/),
+    },
+    serverPassword: {
+      type: "string",
+      label: "OpenCode password",
+      secret: true,
+      description:
+        "Stored as a BB secret. Used only for the existing-instance connection.",
+      experimental_schema: z.string().max(16_384),
+    },
+  });
   let modelSettings = normalizeModelSettings(
     await bb.storage.kv.get(SETTINGS_KEY),
   );
@@ -44,6 +92,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const host = bb.hosts.experimental_client({ contract: opencodeHostContract });
   const syncedSettings = new Map<string, string>();
+  connection.onChange(() => syncedSettings.clear());
 
   async function connectedHostIds(signal?: AbortSignal) {
     return (await bb.sdk.hosts.list({ signal }))
@@ -53,16 +102,47 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function syncSettings(hostIds?: string[], signal?: AbortSignal) {
     const connected = hostIds ?? (await connectedHostIds(signal));
-    const revision = JSON.stringify(modelSettings);
+    const values = await connection.get();
+    const mode = values.connectionMode === "custom" ? "custom" : "auto";
+    const config: ConnectionSettings = {
+      mode,
+      url: values.serverUrl,
+      username: values.serverUsername,
+      password: mode === "custom" ? (values.serverPassword ?? "") : "",
+    };
+    const revision = createHash("sha256")
+      .update(JSON.stringify({ modelSettings, config }))
+      .digest("hex");
+    // A localhost URL names the BB server machine, not every enrolled machine.
+    // Never distribute this password to remote execution hosts.
+    const localHosts =
+      mode === "custom"
+        ? new Set(
+            (await bb.sdk.hosts.list({ signal }))
+              .filter((item) => item.machineProviderId === null)
+              .map((item) => item.id),
+          )
+        : new Set<string>();
     const targets = connected.filter(
       (hostId) => syncedSettings.get(hostId) !== revision,
     );
     const results = await Promise.allSettled(
       targets.map((hostId) => {
-        const call = host.call("setModelSettings", modelSettings, {
-          hostId,
-          signal,
-        });
+        const call = host
+          .call(
+            "configureConnection",
+            {
+              ...config,
+              password:
+                mode === "custom" && !localHosts.has(hostId)
+                  ? ""
+                  : config.password,
+            },
+            { hostId, signal },
+          )
+          .then(() =>
+            host.call("setModelSettings", modelSettings, { hostId, signal }),
+          );
         if (!signal) return call;
         return new Promise((resolve, reject) => {
           const aborted = () =>
@@ -93,6 +173,10 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(
         "Could not sync OpenCode model settings to every connected host",
       );
+      if (mode === "custom")
+        throw new Error(
+          "Could not synchronize the configured OpenCode connection. No automatic fallback was used.",
+        );
     }
   }
 
@@ -171,6 +255,7 @@ export default async function plugin(bb: BbPluginApi) {
     const hosts = (await bb.sdk.hosts.list()).filter(
       (item) => item.status === "connected",
     );
+    await syncSettings(hosts.map((item) => item.id));
     const results = await Promise.all(
       hosts.map(async (item): Promise<HostStatus> => {
         try {
@@ -269,9 +354,13 @@ export default async function plugin(bb: BbPluginApi) {
     experimental_resolvesNativeRoots: true,
     // Settings reach every session and turn command as providerOptions, so a
     // change applies on the next turn without waiting for the host sync.
-    deriveProviderOptions: ({ threadId, projectId }) => {
+    deriveProviderOptions: ({ threadId, projectId, settings }) => {
       const agent = takeSeed(threadId, projectId);
-      return { modelSettings, ...(agent ? { agent } : {}) };
+      const connectionId =
+        settings.connectionMode === "custom"
+          ? `custom:${connectionUrl(String(settings.serverUrl ?? DEFAULT_SERVER_URL))}`
+          : "auto";
+      return { modelSettings, connectionId, ...(agent ? { agent } : {}) };
     },
   });
 

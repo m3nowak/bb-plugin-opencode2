@@ -73,9 +73,9 @@ const STATUS_LABELS: Record<OpenCodeStatus["status"], string> = {
 function statusDetail(status: OpenCodeStatus) {
   if (status.status === "not_installed")
     return "Install OpenCode v2 from the provider settings, or run `npm install -g @opencode/cli`.";
+  if (status.statusMessage) return status.statusMessage;
   if (status.status === "unauthenticated")
     return `Run \`${status.loginCommand}\` on this machine to connect a model provider.`;
-  if (status.statusMessage) return status.statusMessage;
   const parts = [`${status.modelCount} models available`];
   if (
     status.latestVersion &&
@@ -109,6 +109,14 @@ function HostStatusRow({
         <div className="text-sm text-muted-foreground">
           {status ? statusDetail(status) : host.error}
         </div>
+        {status?.serverUrl ? (
+          <div className="text-xs text-muted-foreground">
+            {status.connectionMode === "custom"
+              ? "Existing instance"
+              : "Automatic service"}
+            : {status.serverUrl}
+          </div>
+        ) : null}
       </div>
       <span
         aria-hidden
@@ -251,6 +259,10 @@ export function SettingsSection() {
 
   return (
     <div className="opencode-settings">
+      <div className="text-xs text-muted-foreground">
+        Configure the server URL and password in Extensions → Plugins → OpenCode
+        v2. After changing servers, reload the plugin and start new threads.
+      </div>
       <div className="flex items-center justify-between gap-4">
         <div className="text-sm font-medium">OpenCode</div>
         <Button
@@ -259,7 +271,7 @@ export function SettingsSection() {
           disabled={isLoading || isSaving}
           onClick={() => void load()}
         >
-          Refresh
+          Test connection
         </Button>
       </div>
 

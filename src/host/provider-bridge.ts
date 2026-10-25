@@ -156,6 +156,15 @@ function parseProviderParams(method: string, params: unknown): RecordValue {
 
 async function handle(request: RecordValue) {
   const params = parseProviderParams(String(request.method), request.params);
+  const expectedConnection = stringValue(
+    inputRecord(params.options?.providerOptions).connectionId,
+  );
+  if (expectedConnection) {
+    await openCodeServer.assertConfiguredConnection(
+      expectedConnection,
+      stringValue(params.threadId),
+    );
+  }
   switch (request.method) {
     case "initialize":
       sendResult(request.id, {
@@ -276,7 +285,10 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/resume": {
-      await openCodeServer.start();
+      await openCodeServer.assertSessionConnection(
+        String(params.threadId),
+        String(params.providerThreadId),
+      );
       const modelSettings = await openCodeServer.readModelSettings(
         params.options?.providerOptions,
       );
@@ -301,6 +313,10 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/fork": {
+      await openCodeServer.assertSessionConnection(
+        String(params.threadId),
+        String(params.sourceProviderThreadId),
+      );
       const existing = sessions.get(params.threadId);
       const checkpointId = stringValue(params.sourceProviderCheckpointId);
       // BB reuses the same BB thread ID when rewinding (or editing a past
@@ -423,6 +439,10 @@ async function handle(request: RecordValue) {
     }
     case "thread/name/set":
       {
+        await openCodeServer.assertSessionConnection(
+          String(params.threadId),
+          String(params.providerThreadId),
+        );
         const rename = sessionRenameRequest(
           params.providerThreadId,
           params.title,
@@ -624,6 +644,11 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/discard": {
+      if (typeof params.providerThreadId === "string")
+        await openCodeServer.assertSessionConnection(
+          String(params.threadId),
+          params.providerThreadId,
+        );
       const session = sessions.get(params.threadId);
       if (session) {
         await openCodeServer

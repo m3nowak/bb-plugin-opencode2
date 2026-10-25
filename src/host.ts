@@ -21,6 +21,7 @@ import { nativeSkillRoots } from "./host/opencode-requests.ts";
 import { sessions } from "./host/types.ts";
 
 export { createDynamicToolCallRouter } from "./host/bridge-runtime.ts";
+export { OpenCodeInteractions } from "./host/opencode-interactions.ts";
 export {
   DYNAMIC_TOOLS_MCP_ARG,
   handleDynamicToolsMcpRequest,
@@ -107,6 +108,11 @@ export default experimental_defineHostEntry({
     ...experimental_nativeRootsHostContract,
   },
   handlers: {
+    async configureConnection(input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      await openCodeServer.writeConnectionSettings(input);
+      return { ok: true as const };
+    },
     // BB lists these directories in the composer for OpenCode threads, so
     // skills OpenCode found on its own (~/.agents/skills, ~/.claude/skills,
     // project and config roots) can be invoked with /name.
@@ -142,6 +148,7 @@ export default experimental_defineHostEntry({
     },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      const connection = await openCodeServer.connectionStatus();
       const cwd = process.cwd();
       // Report OpenCode itself even while the BB provider is switched off.
       const [health, installation] = await Promise.all([
@@ -152,20 +159,24 @@ export default experimental_defineHostEntry({
           },
           cwd,
         ),
-        installationStatus(true),
+        connection.connectionMode === "auto" ? installationStatus(true) : null,
       ]);
-      const modelCount = await openCodeServer
-        .modelCatalog(cwd)
-        .then((catalog) => catalog.models.length)
-        .catch(() => 0);
+      const modelCount =
+        health.status === "ready"
+          ? await openCodeServer
+              .modelCatalog(cwd)
+              .then((catalog) => catalog.models.length)
+              .catch(() => 0)
+          : 0;
       return {
         status: health.status === "expired" ? "unauthenticated" : health.status,
         statusMessage: health.statusMessage,
         installedVersion: health.installedVersion,
-        latestVersion: installation.latestVersion,
+        latestVersion: installation?.latestVersion ?? null,
         minimumSupportedVersion: MIN_OPENCODE_VERSION,
         loginCommand: OPENCODE_LOGIN_COMMAND,
         modelCount: health.status === "ready" ? modelCount : 0,
+        ...connection,
       };
     },
     async setModelSettings(input, context) {

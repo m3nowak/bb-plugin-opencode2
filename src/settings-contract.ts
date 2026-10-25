@@ -1,5 +1,6 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { connectionSettingsSchema } from "./connection-settings.ts";
 
 /** The BB session option through which OpenCode's primary agent is chosen. */
 export const AGENT_OPTION_ID = "agent";
@@ -30,6 +31,8 @@ export const openCodeStatusSchema = z
     minimumSupportedVersion: z.string(),
     loginCommand: z.string(),
     modelCount: z.number().int().nonnegative(),
+    connectionMode: z.enum(["auto", "custom"]).optional(),
+    serverUrl: z.string().optional(),
   })
   .strict();
 
@@ -59,6 +62,10 @@ export const modelSettingsSchema = z
   .strict();
 
 export const opencodeHostContract = defineRpcContract({
+  configureConnection: {
+    input: connectionSettingsSchema,
+    output: z.object({ ok: z.literal(true) }).strict(),
+  },
   listModels: {
     input: z.object({ cwd: z.string().min(1).optional() }).strict(),
     output: z

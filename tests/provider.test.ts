@@ -83,7 +83,9 @@ test("synchronizes settings when each host connects", async () => {
   firstRun.controller.abort();
   await firstRun.done;
   assert.deepEqual(
-    harness.experimental_hostRpcCalls.map((call) => call.hostId),
+    harness.experimental_hostRpcCalls
+      .filter((call) => call.method === "setModelSettings")
+      .map((call) => call.hostId),
     ["host-a"],
   );
 
@@ -96,7 +98,9 @@ test("synchronizes settings when each host connects", async () => {
   secondRun.controller.abort();
   await secondRun.done;
   assert.deepEqual(
-    harness.experimental_hostRpcCalls.map((call) => call.hostId),
+    harness.experimental_hostRpcCalls
+      .filter((call) => call.method === "setModelSettings")
+      .map((call) => call.hostId),
     ["host-a", "host-b"],
   );
 });

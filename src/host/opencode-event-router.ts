@@ -26,6 +26,8 @@ import {
   sessionsByProviderId,
   stringValue,
   type ActiveTurn,
+  type BackgroundNotification,
+  type BackgroundTask,
   type OpenCodeRecord,
   type SessionState,
 } from "./types.ts";
@@ -151,7 +153,28 @@ function retryErrorCategory(error: RecordValue) {
 }
 
 const CHILD_EVENT_PATTERN =
-  /^(permission\.asked|session\.(text|reasoning|tool)\.)/;
+  /^(permission\.asked|session\.(?:(text|reasoning|tool)\.|inbox\.(enqueued|delivered)|synthetic$))/;
+
+function backgroundKey(
+  task: Pick<BackgroundTask, "sessionId" | "source" | "resourceId">,
+) {
+  return JSON.stringify([task.sessionId, task.source, task.resourceId]);
+}
+
+/** A successful execution may have handed work to a background job. */
+export function hasPendingWork(active: ActiveTurn): boolean {
+  return (
+    (active.backgroundTasks?.size ?? 0) > 0 ||
+    [...(active.backgroundNotifications?.values() ?? [])].some(
+      (notification) => notification.matched && !notification.delivered,
+    ) ||
+    (active.pendingTools?.size ?? 0) > 0 ||
+    [...(active.opened?.values() ?? [])].some(
+      (item) =>
+        !["agentMessage", "reasoning", "compaction"].includes(item.type),
+    )
+  );
+}
 
 /** The subagent's final report, without OpenCode's wrapper tag. */
 export function subagentSummary(text: string): string {
@@ -220,6 +243,19 @@ export class OpenCodeEventRouter {
     if (session) return this.handleSessionEvent(session, event, data);
     const child = this.childSessions.get(sessionId);
     const type = stringValue(event.type) ?? "";
+    const active = child?.parent.active;
+    if (active && type === "session.execution.started") {
+      (active.runningChildren ??= new Set()).add(sessionId);
+      active.executionVersion = (active.executionVersion ?? 0) + 1;
+      return;
+    }
+    if (
+      active &&
+      /^session\.execution\.(succeeded|failed|interrupted)$/.test(type)
+    ) {
+      active.runningChildren?.delete(sessionId);
+      return;
+    }
     // A subagent's own lifecycle, usage, and compaction belong to the child
     // session; only its visible work joins the parent turn.
     if (!child || !CHILD_EVENT_PATTERN.test(type)) return;
@@ -242,6 +278,44 @@ export class OpenCodeEventRouter {
       return;
     }
     if (!active) return;
+    const createdAt =
+      typeof event.created === "number" ? event.created : Date.now();
+    const ownerSessionId =
+      stringValue(data.sessionID) ?? session.providerThreadId;
+    if (event.type === "session.inbox.enqueued") {
+      const item = inputRecord(data.item);
+      if (item.type === "synthetic")
+        await this.backgroundNotification(
+          session,
+          active,
+          ownerSessionId,
+          inputRecord(item.payload),
+          stringValue(data.inboxID),
+          false,
+          createdAt,
+        );
+      return;
+    }
+    if (event.type === "session.inbox.delivered") {
+      for (const notification of active.backgroundNotifications?.values() ?? [])
+        if (
+          notification.sessionId === ownerSessionId &&
+          notification.inboxId === data.inboxID
+        )
+          notification.delivered = true;
+    }
+    if (event.type === "session.synthetic") {
+      await this.backgroundNotification(
+        session,
+        active,
+        ownerSessionId,
+        data,
+        undefined,
+        true,
+        createdAt,
+      );
+      return;
+    }
     const eventId = stringValue(data.id) ?? "";
     const eventType = stringValue(event.type) ?? "";
     if (eventType.startsWith("session.tool.") && !eventId) return;
@@ -381,6 +455,7 @@ export class OpenCodeEventRouter {
     if (event.type === "session.tool.called") {
       const name = active.pendingTools.get(eventId);
       if (name) {
+        (active.toolStartedAt ??= new Map()).set(eventId, createdAt);
         const input = inputRecord(
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
@@ -429,12 +504,13 @@ export class OpenCodeEventRouter {
       event.type === "session.tool.success" ||
       event.type === "session.tool.failed"
     ) {
-      this.stopShellOutput(active, eventId);
       active.finishedTools ??= new Set();
       if (active.finishedTools.has(eventId)) return;
-      active.finishedTools.add(eventId);
       // handleQuestion may already have closed + answered this call.
       if (active.settledTools.has(eventId)) {
+        this.stopShellOutput(active, eventId);
+        active.finishedTools.add(eventId);
+        active.toolStartedAt?.delete(eventId);
         active.settledTools.delete(eventId);
         active.touchedFiles.delete(eventId);
         active.pendingInput.delete(eventId);
@@ -469,6 +545,50 @@ export class OpenCodeEventRouter {
           },
         ]);
       }
+      const metadata = inputRecord(data.metadata);
+      const resourceId =
+        item.type === "command"
+          ? stringValue(metadata.shellID)
+          : item.type === "delegation"
+            ? stringValue(metadata.sessionID)
+            : undefined;
+      if (
+        event.type === "session.tool.success" &&
+        metadata.status === "running" &&
+        resourceId
+      ) {
+        const task: BackgroundTask = {
+          sessionId: ownerSessionId,
+          source: item.type === "command" ? "shell" : "subagent",
+          resourceId,
+          startedAt: active.toolStartedAt?.get(eventId) ?? active.startedAt,
+        };
+        (active.backgroundTasks ??= new Map()).set(eventId, task);
+        if (task.source === "subagent") {
+          item.background = true;
+          item.childRef = resourceId;
+          this.childSessions.set(resourceId, {
+            parent: session,
+            callId: eventId,
+          });
+        }
+        const notification = active.backgroundNotifications?.get(
+          backgroundKey(task),
+        );
+        if (notification && notification.startedAt >= task.startedAt)
+          await this.completeBackgroundTask(
+            session,
+            active,
+            eventId,
+            task,
+            notification,
+          );
+        return;
+      }
+      this.stopShellOutput(active, eventId);
+      active.finishedTools.add(eventId);
+      active.toolStartedAt?.delete(eventId);
+      active.backgroundTasks?.delete(eventId);
       const output = contentText(data.content);
       if (item.type === "delegation") {
         item.summary =
@@ -578,7 +698,13 @@ export class OpenCodeEventRouter {
       !active.inputDelivered
     )
       return;
-    if (event.type === "session.execution.succeeded")
+    if (event.type === "session.execution.started")
+      active.executionVersion = (active.executionVersion ?? 0) + 1;
+    if (
+      event.type === "session.execution.succeeded" &&
+      !hasPendingWork(active) &&
+      !active.runningChildren?.size
+    )
       this.finish(session, "completed");
     if (event.type === "session.execution.interrupted")
       this.finish(session, "interrupted");
@@ -589,6 +715,261 @@ export class OpenCodeEventRouter {
         "failed",
         stringValue(error.message) ?? "OpenCode execution failed",
       );
+    }
+  }
+
+  private async backgroundNotification(
+    session: SessionState,
+    active: ActiveTurn,
+    sessionId: string,
+    payload: RecordValue,
+    inboxId: string | undefined,
+    delivered: boolean,
+    createdAt = Date.now(),
+  ) {
+    const metadata = inputRecord(payload.metadata);
+    const source = metadata.source;
+    const resourceId =
+      source === "shell"
+        ? stringValue(metadata.shellID)
+        : source === "subagent"
+          ? stringValue(metadata.childID)
+          : undefined;
+    if (
+      !resourceId ||
+      !["completed", "error", "cancelled"].includes(metadata.state)
+    )
+      return;
+    const notification: BackgroundNotification = {
+      sessionId,
+      source,
+      resourceId,
+      startedAt: createdAt,
+      payload,
+      inboxId,
+      delivered,
+    };
+    const key = backgroundKey(notification);
+    const previous = active.backgroundNotifications?.get(key);
+    // A repeated child session can have several background runs in one turn.
+    if (
+      previous &&
+      previous.startedAt > createdAt &&
+      previous.inboxId !== inboxId
+    )
+      return;
+    if (previous?.inboxId === inboxId || inboxId === undefined) {
+      notification.delivered ||= previous?.delivered ?? false;
+      notification.inboxId ??= previous?.inboxId;
+      notification.matched = previous?.matched;
+    }
+    (active.backgroundNotifications ??= new Map()).set(key, notification);
+    for (const [callId, task] of active.backgroundTasks ?? []) {
+      if (session.active !== active) return;
+      if (backgroundKey(task) === key && createdAt >= task.startedAt)
+        await this.completeBackgroundTask(
+          session,
+          active,
+          callId,
+          task,
+          notification,
+        );
+    }
+  }
+
+  private async completeBackgroundTask(
+    session: SessionState,
+    active: ActiveTurn,
+    callId: string,
+    task: BackgroundTask,
+    notification: BackgroundNotification,
+  ) {
+    if (session.active !== active) return;
+    notification.matched = true;
+    const metadata = inputRecord(notification.payload.metadata);
+    const failed = metadata.state !== "completed";
+    const text =
+      stringValue(notification.payload.text) ?? "Background task finished";
+    const event = {
+      type: failed ? "session.tool.failed" : "session.tool.success",
+      created: notification.startedAt,
+      data: {
+        sessionID: task.sessionId,
+        id: callId,
+        name: task.source,
+        content: [{ type: "text", text }],
+        ...(failed ? { error: { message: text } } : {}),
+        metadata: {
+          ...metadata,
+          status: metadata.state,
+          ...(task.source === "subagent" ? { sessionID: task.resourceId } : {}),
+        },
+      },
+    };
+    // The original row already carries its parentRef. Do not re-enter the
+    // child-session dispatcher (which would reset an outer child context).
+    await this.handleSessionEvent(session, event, event.data);
+  }
+
+  hasRunningExecution(session: SessionState, running: RecordValue): boolean {
+    return (
+      session.providerThreadId in running ||
+      [...this.childSessions].some(
+        ([id, child]) => child.parent === session && id in running,
+      )
+    );
+  }
+
+  async backgroundNotificationsSettled(
+    session: SessionState,
+    parentIdle: unknown,
+    settleBefore: number,
+  ): Promise<boolean> {
+    const active = session.active;
+    if (!active) return false;
+    const latestByOwner = new Map<string, number>();
+    for (const notification of active.backgroundNotifications?.values() ?? []) {
+      if (!notification.matched) continue;
+      latestByOwner.set(
+        notification.sessionId,
+        Math.max(
+          latestByOwner.get(notification.sessionId) ?? 0,
+          notification.startedAt,
+        ),
+      );
+    }
+    for (const [owner, createdAt] of latestByOwner) {
+      let idle = parentIdle;
+      if (owner !== session.providerThreadId) {
+        try {
+          const result = await this.request(
+            `/api/session/${encodeURIComponent(owner)}`,
+          );
+          idle = inputRecord(inputRecord(result.data).time).idle;
+        } catch (error) {
+          if (/OpenCode API 404:/.test(String(error))) continue;
+          throw error;
+        }
+      }
+      if (
+        session.active !== active ||
+        typeof idle !== "number" ||
+        idle < createdAt ||
+        idle > settleBefore
+      )
+        return false;
+    }
+    return true;
+  }
+
+  /** Recover durable completion notifications missed by the live-only stream. */
+  async reconcileBackgroundWork(session: SessionState): Promise<void> {
+    const active = session.active;
+    if (!active || !hasPendingWork(active)) return;
+    const owners = new Set([
+      session.providerThreadId,
+      ...[...this.childSessions]
+        .filter(([, child]) => child.parent === session)
+        .map(([id]) => id),
+      ...[...(active.backgroundTasks?.values() ?? [])].map(
+        (task) => task.sessionId,
+      ),
+      ...[...(active.backgroundNotifications?.values() ?? [])].map(
+        (notification) => notification.sessionId,
+      ),
+    ]);
+    for (const sessionId of owners) {
+      try {
+        const path = `/api/session/${encodeURIComponent(sessionId)}`;
+        const inbox = await this.request(`${path}/inbox`);
+        if (session.active !== active) return;
+        for (const raw of Array.isArray(inbox.data) ? inbox.data : []) {
+          const entry = inputRecord(raw);
+          if (entry.type !== "synthetic") continue;
+          await this.backgroundNotification(
+            session,
+            active,
+            sessionId,
+            inputRecord(entry.payload),
+            stringValue(entry.id),
+            false,
+            typeof inputRecord(entry.time).created === "number"
+              ? entry.time.created
+              : Date.now(),
+          );
+        }
+        let cursor: string | undefined;
+        while (session.active === active) {
+          const query = new URLSearchParams({ limit: "100" });
+          if (cursor) query.set("cursor", cursor);
+          else query.set("order", "desc");
+          const result = await this.request(`${path}/message?${query}`);
+          if (session.active !== active) return;
+          const messages = (Array.isArray(result.data) ? result.data : []).map(
+            inputRecord,
+          );
+          if (!messages.length) break;
+          for (const message of messages) {
+            const createdAt = inputRecord(message.time).created;
+            if (typeof createdAt !== "number" || createdAt < active.startedAt)
+              continue;
+            if (message.type === "assistant") {
+              for (const raw of Array.isArray(message.content)
+                ? message.content
+                : []) {
+                const tool = inputRecord(raw);
+                const state = inputRecord(tool.state);
+                if (
+                  tool.type !== "tool" ||
+                  !active.opened.has(tool.id) ||
+                  !["completed", "error"].includes(state.status)
+                )
+                  continue;
+                await this.handleEvent({
+                  type:
+                    state.status === "completed"
+                      ? "session.tool.success"
+                      : "session.tool.failed",
+                  data: {
+                    sessionID: sessionId,
+                    id: tool.id,
+                    name: tool.name,
+                    ...state,
+                  },
+                });
+              }
+            }
+            if (message.type !== "synthetic") continue;
+            await this.backgroundNotification(
+              session,
+              active,
+              sessionId,
+              message,
+              stringValue(message.id),
+              true,
+              createdAt,
+            );
+          }
+          // The first page is newest first; do not scan earlier turns.
+          if (
+            messages.some(
+              (message) => inputRecord(message.time).created < active.startedAt,
+            )
+          )
+            break;
+          const next = stringValue(inputRecord(result.cursor).next);
+          if (!next || next === cursor) break;
+          cursor = next;
+        }
+      } catch (error) {
+        // A removed child must not prevent recovery of the parent or other
+        // threads. Keep unresolved work pending until its parent reports it.
+        if (
+          sessionId === session.providerThreadId ||
+          !/OpenCode API 404:/.test(String(error))
+        )
+          throw error;
+      }
     }
   }
 
@@ -862,6 +1243,10 @@ export class OpenCodeEventRouter {
     active.settledTools.clear();
     active.pendingTools.clear();
     active.pendingInput.clear();
+    active.toolStartedAt?.clear();
+    active.backgroundTasks?.clear();
+    active.backgroundNotifications?.clear();
+    active.runningChildren?.clear();
     active.touchedFiles.clear();
     // OpenCode's session diff endpoint needs snapshots that are often off,
     // so the turn diff is the sequence of patches its edit tools reported.

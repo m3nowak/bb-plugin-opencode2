@@ -17,6 +17,20 @@ export type ModelRef = {
   variant?: string;
 };
 
+export type BackgroundTask = {
+  sessionId: string;
+  source: "shell" | "subagent";
+  resourceId: string;
+  startedAt: number;
+};
+
+export type BackgroundNotification = BackgroundTask & {
+  inboxId?: string;
+  delivered: boolean;
+  matched?: boolean;
+  payload: OpenCodeRecord;
+};
+
 export type ActiveTurn = {
   providerTurnId: string;
   startedAt: number;
@@ -41,6 +55,11 @@ export type ActiveTurn = {
   settledTools: Set<string>;
   /** Tool calls already closed, so a repeated terminal event is ignored. */
   finishedTools?: Set<string>;
+  toolStartedAt?: Map<string, number>;
+  backgroundTasks?: Map<string, BackgroundTask>;
+  backgroundNotifications?: Map<string, BackgroundNotification>;
+  executionVersion?: number;
+  runningChildren?: Set<string>;
   /** Patches of every file change this turn, for `turn.diff`. */
   turnPatches?: string[];
   /** Live shell output pollers by tool call ID. */
