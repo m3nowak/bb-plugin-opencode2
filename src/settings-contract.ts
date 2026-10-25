@@ -1,6 +1,7 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { connectionSettingsSchema } from "./connection-settings.ts";
+import { goUsageSnapshotSchema } from "./usage-contract.ts";
 
 /** The BB session option through which OpenCode's primary agent is chosen. */
 export const AGENT_OPTION_ID = "agent";
@@ -58,10 +59,15 @@ export const modelSettingsSchema = z
     // Add one deny rule to OpenCode's global config so OpenCode's own
     // sessions (TUI, web) don't list BB threads' tools. On by default.
     hideBbToolsOutsideBb: z.boolean().default(true),
+    reportGoUsage: z.boolean().default(false),
   })
   .strict();
 
 export const opencodeHostContract = defineRpcContract({
+  getGoUsage: {
+    input: z.object({}).strict(),
+    output: goUsageSnapshotSchema,
+  },
   configureConnection: {
     input: connectionSettingsSchema,
     output: z.object({ ok: z.literal(true) }).strict(),

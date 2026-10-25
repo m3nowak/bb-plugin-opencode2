@@ -145,6 +145,7 @@ test("stores a private host copy with mode 0600, separate from ordinary model se
     enabledModels: null,
     disableSubagents: true,
     hideBbToolsOutsideBb: true,
+    reportGoUsage: false,
   });
   assert.ok(
     !(

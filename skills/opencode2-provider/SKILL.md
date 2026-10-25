@@ -1,6 +1,6 @@
 ---
 name: opencode2-provider
-description: "Inspect, configure, or troubleshoot the BB OpenCode v2 provider: install and version, connecting model providers, model allowlist, native subagents, permission modes, and plan mode."
+description: "Configure or troubleshoot BB's OpenCode v2 provider, connections, model allowlist, Go usage, subagents, permissions, and plan mode."
 ---
 
 # OpenCode v2 provider
@@ -42,6 +42,9 @@ the plugin settings page or `saveSettings` with the full object:
   OpenCode config, so OpenCode's own sessions don't list BB threads' tools.
   Turning it off removes the rule (restoring the file exactly if untouched).
   OpenCode applies config changes on its next idle location reload.
+- `reportGoUsage` defaults to `false`. Enable it to report Go allowance and
+  reset times in BB's usage panel. See [provider settings](../../README.md#provider-settings)
+  for API requirements, account deduplication, and refresh behavior.
 
 Settings apply from the next turn.
 
@@ -60,7 +63,7 @@ Settings apply from the next turn.
   turn. `/plan` still overrides it for that turn.
 - Reasoning levels map to the model's OpenCode variants. Models without
   variants run on their defaults whatever level is picked.
-- Not supported: thread archive, goals, service tiers, the usage dashboard,
+- Not supported: thread archive, goals, service tiers,
   and `instructionMode: "replace"` (BB instructions are added to OpenCode's).
 
 ## Troubleshooting

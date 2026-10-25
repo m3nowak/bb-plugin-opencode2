@@ -31,6 +31,8 @@ src/
   components/, lib/    UI primitives used by the settings page
   settings-contract.ts Settings and RPC shapes shared by server, host, and app
   model-settings.ts    Model allowlist normalization
+  usage-contract.ts    Discoverable provider-usage.v1 wire contract
+  usage-source.ts      Opt-in usage source, per-host cache and shared account group
   host/                Host implementation, described below
 tests/                 Node tests, plus a jsdom test for the settings UI
 skills/                Agent skill shipped with the plugin
@@ -47,6 +49,7 @@ Inside `src/host/`:
 - `session-manager.ts` owns session setup, per-turn preparation (settings,
   permissions, plan mode, model), MCP registration, and shutdown.
 - `maintenance.ts` implements health, install, and update.
+- `go-usage.ts` reads OpenCode's optional usage-limits API and maps Go meters.
 - `dynamic-tools-mcp.ts` and `bridge-runtime.ts` expose BB dynamic tools to
   OpenCode and route their calls back.
 - `opencode-config.ts` maintains the global deny rule that keeps BB's tools out
@@ -75,6 +78,18 @@ Inside `src/host/`:
   `/compact`).
 - **Turn diffs are built from the turn's own patches**, because
   `/api/session/:id/diff` stays empty without snapshots.
+
+## Go subscription usage
+
+Go usage is a discoverable plugin RPC source rather than a provider bridge
+maintenance capability. Inventory reads connected-host metadata and previously
+observed account IDs only. Collection reads exactly one host through host RPC.
+All resources use shared display scope so BB deduplicates account IDs across
+hosts, even on the first collection. Unknown identities remain separate.
+Cache entries are successful measurements for at most 60 seconds; a failed
+refresh reports an error, not cached percentages. Disabling clears observations
+and invalidates in-flight results; the host also aborts its active usage request.
+Connection changes clear observations too. No usage polling service is added.
 
 ## Known gaps
 

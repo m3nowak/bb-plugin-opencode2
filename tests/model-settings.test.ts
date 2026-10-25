@@ -17,6 +17,19 @@ test("normalizes legacy and malformed model settings", () => {
       enabledModels: ["openai/gpt-5"],
       disableSubagents: true,
       hideBbToolsOutsideBb: true,
+      reportGoUsage: false,
     },
+  );
+});
+
+test("Go usage is opt-in even when malformed legacy settings need recovery", () => {
+  assert.equal(DEFAULT_MODEL_SETTINGS.reportGoUsage, false);
+  assert.equal(
+    normalizeModelSettings({ reportGoUsage: "true" }).reportGoUsage,
+    false,
+  );
+  assert.equal(
+    normalizeModelSettings({ reportGoUsage: true }).reportGoUsage,
+    true,
   );
 });

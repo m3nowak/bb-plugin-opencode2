@@ -19,6 +19,9 @@ import { openCodeServer } from "./host/opencode-server.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
 import { sessions } from "./host/types.ts";
+import { GoUsageReader } from "./host/go-usage.ts";
+
+const goUsageReader = new GoUsageReader();
 
 export { createDynamicToolCallRouter } from "./host/bridge-runtime.ts";
 export { OpenCodeInteractions } from "./host/opencode-interactions.ts";
@@ -110,8 +113,23 @@ export default experimental_defineHostEntry({
   handlers: {
     async configureConnection(input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      // A new configuration must also be able to repair a corrupt private copy.
+      const previous = await openCodeServer
+        .readConnectionSettings()
+        .catch(() => null);
+      if (JSON.stringify(previous) !== JSON.stringify(input))
+        goUsageReader.clear();
       await openCodeServer.writeConnectionSettings(input);
       return { ok: true as const };
+    },
+    async getGoUsage(_input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      if (!(await openCodeServer.readModelSettings()).reportGoUsage)
+        throw new Error("OpenCode Go usage is disabled.");
+      return goUsageReader.read(
+        (path, init) => openCodeServer.request(path, init),
+        context.signal,
+      );
     },
     // BB lists these directories in the composer for OpenCode threads, so
     // skills OpenCode found on its own (~/.agents/skills, ~/.claude/skills,
@@ -181,6 +199,7 @@ export default experimental_defineHostEntry({
     },
     async setModelSettings(input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      if (!input.reportGoUsage) goUsageReader.clear();
       await openCodeServer.writeModelSettings(input);
       // Best-effort: a config we cannot edit only leaves BB tools visible
       // to OpenCode's own sessions, where calling them is refused anyway.
@@ -206,6 +225,7 @@ export default experimental_defineHostEntry({
     },
   },
   dispose: async () => {
+    goUsageReader.clear();
     await shutdownBridge("OpenCode host worker disposed");
   },
 });

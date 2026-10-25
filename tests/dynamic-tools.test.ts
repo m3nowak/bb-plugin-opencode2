@@ -90,6 +90,7 @@ test("reads session instructions from bridge execution options", () => {
       enabledModels: null,
       disableSubagents: true,
       hideBbToolsOutsideBb: true,
+      reportGoUsage: false,
     },
   );
 
