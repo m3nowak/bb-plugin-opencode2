@@ -94,14 +94,8 @@ export default async function plugin(bb: BbPluginApi) {
   const host = bb.hosts.experimental_client({ contract: opencodeHostContract });
   const syncedSettings = new Map<string, string>();
   const goUsage = registerGoUsageSource(bb, {
+    providerId: PROVIDER_ID,
     enabled: () => modelSettings.reportGoUsage,
-    async load(hostId, signal) {
-      await syncSettings([hostId], signal);
-      signal.throwIfAborted();
-      if (!modelSettings.reportGoUsage)
-        throw new Error("OpenCode Go usage is disabled.");
-      return host.call("getGoUsage", {}, { hostId, signal });
-    },
   });
   connection.onChange(() => {
     syncedSettings.clear();
@@ -331,10 +325,11 @@ export default async function plugin(bb: BbPluginApi) {
     displayName: "OpenCode v2",
     icon: "./icons/opencode.svg",
     strings: {
+      // Also shown by the usage panel, where the sign-in is OpenCode Console.
       signInHint:
-        "Run `opencode2 auth login` on this machine to connect a model provider.",
+        "Run `opencode2 auth login` on this machine to connect a model provider, or OpenCode Console for Go usage.",
       expiredHint:
-        "An OpenCode model provider needs to be reconnected. Run `opencode2 auth login`, then reload.",
+        "An OpenCode model provider or OpenCode Console sign-in needs to be reconnected. Run `opencode2 auth login`, then reload.",
       installUrl: "https://opencode.ai/v2/docs/",
       brandPrefix: "OpenCode ",
       iconTint: { light: "#18181B", dark: "#FAFAFA" },
@@ -343,7 +338,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     // Only show the provider when `opencode2` is installed on the target machine.
     experimental_visibility: "installed",
-    maintenance: { health: true, usage: false, installation: true },
+    // Usage is OpenCode Go only, opt-in; the bridge answers unsupported
+    // until `reportGoUsage` is on.
+    maintenance: { health: true, usage: true, installation: true },
     models: { scope: "workspace" },
     capabilities: {
       supportsServiceTier: false,

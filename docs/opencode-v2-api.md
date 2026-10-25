@@ -56,19 +56,26 @@ capabilities:{input[]}, enabled, cost[], status}`.
 
 ## Optional Go subscription usage
 
-The current published V2 OpenAPI adds `GET /api/experimental/usage/limits`.
-This is optional; it is not part of the 2.0.27 baseline verified above.
-The result is `{ location, data }`, with `data: null` when no Console workspace
-is connected. Otherwise `data.workspace.id` identifies the quota account and
-`data.go`, when present, has `rolling`, `weekly`, and `monthly` meters. Each
-meter has `percent`, `limited`, and `resetsAt` in epoch milliseconds.
-The plugin maps the percentage directly and converts reset times to ISO.
-The response also includes Console budgets, which are not prepaid balance and
-are deliberately not reported as Go allowance. The endpoint has no prepaid
-balance field and does not identify whether the plan is Go or Go Plus.
+Stable OpenCode (2.1.4) has no usage route. `GET /api/experimental/usage/limits`
+exists only in dev builds since October 2026, so the plugin does not use it.
 
-Only an explicit `reportGoUsage: true` enables collection. Older servers and
-collection failures become usage statuses; they never fail a conversation.
+Instead it reads what that route reads. `GET /api/credential` lists stored
+credentials as `{ data: [{ integrationID, active, value }] }` and returns raw
+secrets, so the plugin keeps them in memory only. The Console sign-in is the
+active `integrationID: "opencode"` entry, with `value` either
+`{ type: "oauth", access, expires, metadata }` or `{ type: "key", key }`.
+`metadata` carries `server` (default `https://opencode.ai/console`; the retired
+`https://console.opencode.ai` maps onto it), `orgID`, `orgName`, and `email`.
+
+`GET https://opencode.ai/zen/go/v1/usage` with `Authorization: Bearer <token>`
+and `x-opencode-org-id: <orgID>` returns
+`{ usage: { rolling, weekly, monthly } }`. Each meter has `status` (`ok` or
+`rate-limited`), `percent`, and an ISO `resetsAt`. HTTP 401 means the token
+expired; HTTP 403 means the workspace has no Go subscription. The response has
+no prepaid balance and does not say whether the plan is Go or Go Plus.
+
+Only an explicit `reportGoUsage: true` enables collection. Collection failures
+become usage statuses; they never fail a conversation.
 
 ## Permission rules
 
