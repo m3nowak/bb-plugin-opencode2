@@ -1,4 +1,7 @@
-import type { DynamicTool } from "@get-bb/plugin-sdk/provider-bridge";
+import type {
+  DeltaBackgroundTaskShape,
+  DynamicTool,
+} from "@get-bb/plugin-sdk/provider-bridge";
 import type { DynamicToolsMcpProxy } from "./dynamic-tools-mcp.ts";
 
 /**
@@ -32,6 +35,7 @@ export type BackgroundNotification = BackgroundTask & {
 };
 
 export type ActiveTurn = {
+  /** Internal correlation token only; BB owns the wire-level turn lifecycle. */
   providerTurnId: string;
   startedAt: number;
   /** Set once OpenCode accepted the prompt; reconciliation waits for it. */
@@ -56,8 +60,12 @@ export type ActiveTurn = {
   /** Tool calls already closed, so a repeated terminal event is ignored. */
   finishedTools?: Set<string>;
   toolStartedAt?: Map<string, number>;
+  toolDescriptions?: Map<string, string>;
   backgroundTasks?: Map<string, BackgroundTask>;
+  /** Native BB task rows, separate from the original command/delegation. */
+  backgroundItems?: Map<string, DeltaBackgroundTaskShape>;
   backgroundNotifications?: Map<string, BackgroundNotification>;
+  mainRunIdle?: boolean;
   executionVersion?: number;
   runningChildren?: Set<string>;
   /** Patches of every file change this turn, for `turn.diff`. */

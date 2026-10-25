@@ -22,8 +22,8 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "bb": ">=0.41",
-    "bbPluginSdk": ">=0.6.49"
+    "bb": ">=0.47.1",
+    "bbPluginSdk": ">=0.6.79"
   },
   "scripts": {
     "build": "bb plugin build",
@@ -44,7 +44,7 @@
     "app": "./src/app.tsx"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "0.6.49",
+    "@get-bb/plugin-sdk": "0.6.79",
     "@radix-ui/react-slot": "^1.3.3",
     "zod": "^4.5.4"
   },

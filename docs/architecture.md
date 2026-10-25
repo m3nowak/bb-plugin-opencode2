@@ -44,6 +44,8 @@ Inside `src/host/`:
   catalog, persistence, event stream, and turn reconciliation.
 - `opencode-event-router.ts` translates OpenCode events into BB deltas,
   including live shell output and subagent nesting.
+- `background-activity.ts` maps background work to BB's native task rows,
+  which drive the composer task panel and agent-stack activity icons.
 - `session-manager.ts` owns session setup, per-turn preparation (settings,
   permissions, plan mode, model), MCP registration, and shutdown.
 - `maintenance.ts` implements health, install, and update.
@@ -73,6 +75,16 @@ Inside `src/host/`:
 - **Terminal execution events wait for this turn's `session.inbox.delivered`.**
   Earlier work finishing must not end a new turn (this broke the turn after
   `/compact`).
+- **BB owns the current turn.** OpenCode has no native turn IDs. Internal
+  correlation IDs are removed at the emission boundary so BB's assembler can
+  attach `turn.mainRun` idle/resume updates to the current turn. Questions and
+  approvals use `turnId: null`, while tool item IDs still use native-ID mapping.
+- **Background work keeps the turn open, not the main run busy.** A background
+  handoff opens a separate `backgroundTask` row linked to its command or
+  delegation. When the parent execution succeeds with work outstanding, the
+  bridge emits `turn.mainRun: idle`; root activity resumes it. Child activity
+  does not resume the parent. Completion, failure, and interruption close the
+  task rows as well as their original tool rows.
 - **Turn diffs are built from the turn's own patches**, because
   `/api/session/:id/diff` stays empty without snapshots.
 
