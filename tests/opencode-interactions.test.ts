@@ -87,11 +87,11 @@ test("forwards a direct BB user_answer to OpenCode instead of dismissing it", as
   );
 });
 
-test("marks question turn IDs as provider-native for BB to translate", async () => {
+test("attaches questions to BB's current turn without a synthetic native turn ID", async () => {
   const f = fixture();
   await f.create(userAnswer).handleQuestion(f.session, f.active, "question-1");
 
-  assert.equal(f.interactions[0]?.turnId, f.active.providerTurnId);
+  assert.equal(f.interactions[0]?.turnId, null);
   assert.equal(f.interactions[0]?.providerNativeIds, true);
 });
 
@@ -124,7 +124,34 @@ test("accepts direct BB approval decisions and translates native IDs", async () 
   });
 
   assert.equal(f.interactions[0]?.providerNativeIds, true);
+  assert.equal(f.interactions[0]?.turnId, null);
   const reply = f.requests.find((request) => request.path.endsWith("/reply"));
   assert.ok(reply);
   assert.deepEqual(JSON.parse(String(reply.init?.body)), { decision: "once" });
+});
+
+test("a late form reply cannot close a question in the next BB-managed turn", async () => {
+  const f = fixture();
+  const interactions = new OpenCodeInteractions(
+    async (path) => {
+      if (path.endsWith("/reply")) {
+        f.session.active = fixture().active;
+        return {};
+      }
+      return {
+        data: [
+          {
+            id: "form-1",
+            metadata: { tool: { id: "question-1" } },
+            fields: [{ key: "q0", type: "string", title: "Choice" }],
+          },
+        ],
+      };
+    },
+    (_threadId, deltas) => f.deltas.push(...deltas),
+    async () => userAnswer,
+  );
+  await interactions.handleQuestion(f.session, f.active, "question-1");
+  assert.equal(f.deltas.length, 0);
+  assert.ok(f.session.active?.opened.has("question-1"));
 });

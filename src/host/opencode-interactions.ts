@@ -97,7 +97,7 @@ export class OpenCodeInteractions {
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
-          turnId: active.providerTurnId,
+          turnId: null,
           providerNativeIds: true,
           payload,
         },
@@ -170,6 +170,7 @@ export class OpenCodeInteractions {
     status: "completed" | "failed",
     text: string,
   ) {
+    if (session.active !== active) return;
     const item = active.opened.get(callId) ?? {
       type: "tool",
       tool: "question",
@@ -270,7 +271,7 @@ export class OpenCodeInteractions {
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
-          turnId: active.providerTurnId,
+          turnId: null,
           providerNativeIds: true,
           payload: { kind: "user_question", questions },
         },

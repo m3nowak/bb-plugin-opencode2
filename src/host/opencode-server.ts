@@ -1099,6 +1099,17 @@ export class OpenCodeServer {
           (await this.request("/api/session/active")).data,
         );
         if (
+          session.active === active &&
+          active.executionVersion === executionVersion &&
+          !stopped &&
+          !(session.providerThreadId in running) &&
+          typeof idle === "number" &&
+          idle >= active.startedAt &&
+          Date.now() - idle >= RECONCILE_SETTLE_MS &&
+          (hasPendingWork(active) || active.runningChildren?.size)
+        )
+          this.eventRouter.setMainRunState(session, "idle");
+        if (
           session.active !== active ||
           active.executionVersion !== executionVersion ||
           (stopped

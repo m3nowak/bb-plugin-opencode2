@@ -5,11 +5,11 @@ A [BB](https://getbb.app) plugin that runs BB threads through an installed
 connection, model credentials, and its own tool execution. The plugin translates
 between OpenCode's v2 API and events and BB's provider bridge protocol.
 
-Verified against OpenCode 2.0.26–2.0.27 and BB 0.46 (Plugin SDK 0.6.37).
+OpenCode API verified against 2.0.26–2.0.27. Uses BB Plugin SDK 0.6.79.
 
 ## Requirements
 
-- BB 0.41 or newer (developed and verified on 0.46)
+- BB 0.47.1 or newer
 - OpenCode v2 2.0.26 or newer (`opencode2` on the host's `PATH`). BB can
   install it (`npm install -g @opencode/cli`) or update it
   (`opencode2 upgrade`) from the provider settings.
@@ -50,6 +50,7 @@ the provider is enabled in the plugin settings.
 | OpenCode MCP Code Mode | Your MCP servers keep OpenCode's default Code Mode. Each `execute` call shows as a "Ran code" row titled with the MCP tools it calls; each of those calls is approved like any other tool.                                                                       |
 | BB CLI in shells       | OpenCode shells get BB's per-session environment and `bb` on `PATH`.                                                                                                                                                                                             |
 | Native subagents       | Off by default: OpenCode's `subagent` tool is denied and hidden, so agents delegate through BB. When allowed, each subagent is a BB delegation row with its work nested inside.                                                                                  |
+| Background activity    | Background commands and subagents appear in BB's task panel above the composer. When the main agent is idle, the agent stack shows their activity icons instead of a spinner. Synchronous calls keep the spinner.                                                |
 | Skills                 | BB's `/` menu lists every skill OpenCode discovers for the workspace (`~/.agents/skills`, `~/.claude/skills`, project and config roots), and picking one activates it in OpenCode. BB's own skills that OpenCode does not know are attached as `SKILL.md` files. |
 | Timeline rows          | Reads, searches, directory listings, web search and fetch, commands with live output and exit codes, and file changes built from OpenCode's own patches.                                                                                                         |
 | Turn diff              | Each turn's file patches are reported as the turn diff.                                                                                                                                                                                                          |

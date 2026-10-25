@@ -1,5 +1,9 @@
 import { experimental_COMPACTION_PRESENTATION as compactionPresentation } from "@get-bb/plugin-sdk/provider-bridge";
 import { dynamicToolCallRouter, emit } from "./bridge-runtime.ts";
+import {
+  closeBackgroundActivity,
+  openBackgroundActivity,
+} from "./background-activity.ts";
 import { OpenCodeInteractions } from "./opencode-interactions.ts";
 import { toolFailureError } from "./prompt.ts";
 import { dynamicMcpServerName, locationQuery } from "./opencode-requests.ts";
@@ -225,11 +229,12 @@ export class OpenCodeEventRouter {
         if (!id) return delta;
         if (
           delta.kind === "item.open" &&
+          !key.parentRef &&
           this.childParentRef &&
           !this.parentRefs.has(id)
         )
           this.parentRefs.set(id, this.childParentRef);
-        const parentRef = this.parentRefs.get(id);
+        const parentRef = stringValue(key.parentRef) ?? this.parentRefs.get(id);
         return parentRef ? { ...delta, key: { ...key, parentRef } } : delta;
       }),
     );
@@ -282,6 +287,13 @@ export class OpenCodeEventRouter {
       typeof event.created === "number" ? event.created : Date.now();
     const ownerSessionId =
       stringValue(data.sessionID) ?? session.providerThreadId;
+    if (
+      ownerSessionId === session.providerThreadId &&
+      /^(session\.execution\.started|session\.(text|reasoning)\.|session\.tool\.(input\.|called))/.test(
+        event.type,
+      )
+    )
+      this.setMainRunState(session, "running");
     if (event.type === "session.inbox.enqueued") {
       const item = inputRecord(data.item);
       if (item.type === "synthetic")
@@ -460,6 +472,9 @@ export class OpenCodeEventRouter {
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
         const row = sessionToolRow(session, name, input);
+        const description = stringValue(input.description);
+        if (description)
+          (active.toolDescriptions ??= new Map()).set(eventId, description);
         if (row.item.type === "delegation")
           (row.item as RecordValue).childRef = eventId;
         active.opened.set(eventId, row.item);
@@ -564,6 +579,10 @@ export class OpenCodeEventRouter {
           startedAt: active.toolStartedAt?.get(eventId) ?? active.startedAt,
         };
         (active.backgroundTasks ??= new Map()).set(eventId, task);
+        this.emit(
+          session.bbThreadId,
+          openBackgroundActivity(active, eventId, task, item, input),
+        );
         if (task.source === "subagent") {
           item.background = true;
           item.childRef = resourceId;
@@ -590,6 +609,23 @@ export class OpenCodeEventRouter {
       active.toolStartedAt?.delete(eventId);
       active.backgroundTasks?.delete(eventId);
       const output = contentText(data.content);
+      const failed =
+        event.type === "session.tool.failed" ||
+        (item.type === "command" && (shellExitCode(data) ?? 0) !== 0);
+      this.emit(
+        session.bbThreadId,
+        closeBackgroundActivity(
+          active,
+          eventId,
+          inputRecord(data.metadata).state === "cancelled"
+            ? "interrupted"
+            : failed
+              ? "failed"
+              : "completed",
+          output || stringValue(inputRecord(data.error).message),
+        ),
+      );
+      active.toolDescriptions?.delete(eventId);
       if (item.type === "delegation") {
         item.summary =
           event.type === "session.tool.success"
@@ -700,12 +736,11 @@ export class OpenCodeEventRouter {
       return;
     if (event.type === "session.execution.started")
       active.executionVersion = (active.executionVersion ?? 0) + 1;
-    if (
-      event.type === "session.execution.succeeded" &&
-      !hasPendingWork(active) &&
-      !active.runningChildren?.size
-    )
-      this.finish(session, "completed");
+    if (event.type === "session.execution.succeeded") {
+      if (!hasPendingWork(active) && !active.runningChildren?.size)
+        this.finish(session, "completed");
+      else this.setMainRunState(session, "idle");
+    }
     if (event.type === "session.execution.interrupted")
       this.finish(session, "interrupted");
     if (event.type === "session.execution.failed") {
@@ -716,6 +751,14 @@ export class OpenCodeEventRouter {
         stringValue(error.message) ?? "OpenCode execution failed",
       );
     }
+  }
+
+  setMainRunState(session: SessionState, state: "idle" | "running") {
+    const active = session.active;
+    const idle = state === "idle";
+    if (!active || (active.mainRunIdle ?? false) === idle) return;
+    active.mainRunIdle = idle;
+    this.emit(session.bbThreadId, [{ kind: "turn.mainRun", state }]);
   }
 
   private async backgroundNotification(
@@ -1174,6 +1217,7 @@ export class OpenCodeEventRouter {
     key: string,
     changes: RecordValue[],
   ) {
+    if (session.active !== active) return;
     for (const change of changes)
       if (typeof change.diff === "string" && change.diff)
         (active.turnPatches ??= []).push(change.diff);
@@ -1226,6 +1270,11 @@ export class OpenCodeEventRouter {
     );
     for (const [, formId] of active.openQuestions)
       void this.interactions.cancelQuestionForm(session, formId);
+    for (const callId of active.backgroundItems?.keys() ?? [])
+      this.emit(
+        session.bbThreadId,
+        closeBackgroundActivity(active, callId, status, error),
+      );
     for (const [id, item] of active.opened) {
       this.emit(session.bbThreadId, [
         {
@@ -1244,6 +1293,7 @@ export class OpenCodeEventRouter {
     active.pendingTools.clear();
     active.pendingInput.clear();
     active.toolStartedAt?.clear();
+    active.toolDescriptions?.clear();
     active.backgroundTasks?.clear();
     active.backgroundNotifications?.clear();
     active.runningChildren?.clear();

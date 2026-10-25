@@ -496,12 +496,9 @@ async function handle(request: RecordValue) {
         return;
       }
       emit(session.bbThreadId, [
-        // Order matters: BB records turn/input/accepted only against an
-        // already-started turn. Emitting input.accepted first (both carry the
-        // same providerTurnId) makes the assembler scope the accepted event to
-        // a turn BB hasn't started yet, so it is dropped, the turn keeps zero
-        // accepted inputs, and BB hides Edit message / rejects edit-message
-        // with "not accepted into exactly one turn".
+        // Open before accepting input so BB records it against exactly one
+        // turn. The emission boundary removes our internal correlation ID;
+        // BB manages the current turn, including main-run idle/resume state.
         { kind: "turn.open", providerTurnId: active.providerTurnId },
         {
           kind: "input.accepted",

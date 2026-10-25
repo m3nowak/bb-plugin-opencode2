@@ -167,7 +167,13 @@ export function boundedTimelineDelta(delta: RecordValue): RecordValue {
 }
 
 export function timelineDeltasForEmission(values: RecordValue[]) {
-  return values.map(boundedTimelineDelta);
+  return values.map((value) => {
+    // OpenCode has no native turn IDs. Let BB own the current turn, as the
+    // Claude bridge does. Explicit providerTurnId deltas bypass that current
+    // turn in BB's assembler, so turn.mainRun would otherwise be ignored.
+    const { providerTurnId: _providerTurnId, ...delta } = value;
+    return boundedTimelineDelta(delta);
+  });
 }
 
 export function itemKey(providerItemId: string, channel?: string) {
@@ -259,7 +265,6 @@ export function providerFailureDeltas(input: {
       kind: "provider.error",
       message: input.error,
       providerTurnId: input.providerTurnId,
-      settlesTurn: true,
     },
     {
       kind: "turn.boundary",

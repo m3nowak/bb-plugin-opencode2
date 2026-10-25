@@ -99,7 +99,6 @@ test("projects provider failures as a visible error followed by a failed turn bo
         kind: "provider.error",
         message: "This model requires 18+ age confirmation.",
         providerTurnId: "turn_1",
-        settlesTurn: true,
       },
       {
         kind: "turn.boundary",
