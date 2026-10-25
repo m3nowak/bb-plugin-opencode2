@@ -54,6 +54,22 @@ capabilities:{input[]}, enabled, cost[], status}`.
   replay. `GET /api/experimental/session/:id/log` has sequence IDs and may
   allow replay.
 
+## Optional Go subscription usage
+
+The current published V2 OpenAPI adds `GET /api/experimental/usage/limits`.
+This is optional; it is not part of the 2.0.27 baseline verified above.
+The result is `{ location, data }`, with `data: null` when no Console workspace
+is connected. Otherwise `data.workspace.id` identifies the quota account and
+`data.go`, when present, has `rolling`, `weekly`, and `monthly` meters. Each
+meter has `percent`, `limited`, and `resetsAt` in epoch milliseconds.
+The plugin maps the percentage directly and converts reset times to ISO.
+The response also includes Console budgets, which are not prepaid balance and
+are deliberately not reported as Go allowance. The endpoint has no prepaid
+balance field and does not identify whether the plan is Go or Go Plus.
+
+Only an explicit `reportGoUsage: true` enables collection. Older servers and
+collection failures become usage statuses; they never fail a conversation.
+
 ## Permission rules
 
 Rules are `[{action, resource, effect: allow|deny|ask}]`. The agent ruleset

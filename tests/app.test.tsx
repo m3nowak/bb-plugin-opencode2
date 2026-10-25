@@ -45,6 +45,7 @@ describe("OpenCode settings", () => {
             enabledModels: null,
             disableSubagents: true,
             hideBbToolsOutsideBb: true,
+            reportGoUsage: false,
           }),
           listModels: async () => ({ models: [] }),
           getNewThreadAgent: async () => ({ agent: null }),
@@ -78,6 +79,7 @@ describe("OpenCode settings", () => {
             enabledModels: null,
             disableSubagents: true,
             hideBbToolsOutsideBb: true,
+            reportGoUsage: false,
           }),
           listModels: async () => ({
             models: [
@@ -131,6 +133,7 @@ describe("OpenCode settings", () => {
         enabledModels: null,
         disableSubagents: false,
         hideBbToolsOutsideBb: true,
+        reportGoUsage: false,
       });
     });
 
@@ -144,6 +147,22 @@ describe("OpenCode settings", () => {
         enabledModels: null,
         disableSubagents: false,
         hideBbToolsOutsideBb: true,
+        reportGoUsage: false,
+      });
+    });
+
+    const usageToggle = slot.getByRole("switch", {
+      name: "Report OpenCode Go usage",
+    });
+    expect(usageToggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(usageToggle);
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenLastCalledWith({
+        providerEnabled: false,
+        enabledModels: null,
+        disableSubagents: false,
+        hideBbToolsOutsideBb: true,
+        reportGoUsage: true,
       });
     });
   });
@@ -213,6 +232,7 @@ describe("OpenCode agent picker", () => {
             enabledModels: null,
             disableSubagents: true,
             hideBbToolsOutsideBb: true,
+            reportGoUsage: false,
           }),
           getStatus: async () => ({ hosts: [] }),
         },

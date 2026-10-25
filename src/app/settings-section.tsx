@@ -301,6 +301,16 @@ export function SettingsSection() {
       <div className="rounded-lg border border-border p-4">
         <div className="flex flex-col gap-4">
           <SettingRow
+            title="Report OpenCode Go usage"
+            description="Show Go subscription limits and reset times in BB's usage panel. Reads the account connected in OpenCode on each host; the same workspace appears once. No prepaid balance is reported. Off by default."
+            checked={settings?.reportGoUsage === true}
+            disabled={busy}
+            label="Report OpenCode Go usage"
+            onCheckedChange={(next) => {
+              if (settings) void save({ ...settings, reportGoUsage: next });
+            }}
+          />
+          <SettingRow
             title="Show in the provider picker"
             description="Offer OpenCode v2 for new threads. Existing threads keep their provider."
             checked={settings?.providerEnabled ?? false}

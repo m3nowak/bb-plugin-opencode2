@@ -67,7 +67,6 @@ OpenCode v2 has no API for these, so the provider declares them unsupported.
 | Archive and unarchive             | Sessions record an archive time, but the API cannot set it.                                  |
 | Thread goals                      | No equivalent in OpenCode.                                                                   |
 | Service tiers                     | No equivalent in OpenCode.                                                                   |
-| Usage dashboard                   | OpenCode exposes cost totals, not rate-limit windows. Per-turn usage still works.            |
 | `instructionMode: "replace"`      | Session instruction entries add to OpenCode's own instructions; they cannot replace them.    |
 | Filtering native tools per prompt | `disallowedTools` filters BB dynamic tools; native OpenCode tools have no per-prompt switch. |
 
@@ -102,6 +101,15 @@ service discovery behavior.
 
 - **Status** shows each connected host's OpenCode version, available updates,
   and model count, with the command to run when something is missing.
+- **Report OpenCode Go usage** is off by default. When enabled, BB's usage
+  panel shows the connected Console workspace's five-hour, weekly, and monthly
+  Go allowance and reset times. Accounts from all connected hosts appear in one
+  OpenCode Go group, deduplicated by workspace ID. Data is fetched on demand,
+  cached for up to 60 seconds, and refreshed by the panel's reload action.
+  Turning it off clears the cache and stops collection. Requires OpenCode's
+  experimental usage-limits API and a Console workspace connection; an older
+  server or missing sign-in produces a status instead of zero usage. Prepaid
+  balance and Console budgets are not reported. No new credentials are stored.
 - **Show in the provider picker** enables or hides the provider.
 - **Allow OpenCode subagents** lets OpenCode use its native subagents (off by
   default).

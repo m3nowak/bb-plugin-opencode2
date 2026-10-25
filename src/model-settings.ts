@@ -8,6 +8,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   enabledModels: null,
   disableSubagents: true,
   hideBbToolsOutsideBb: true,
+  reportGoUsage: false,
 };
 
 export function normalizeModelSettings(value: unknown): ModelSettings {
@@ -38,5 +39,6 @@ export function normalizeModelSettings(value: unknown): ModelSettings {
     enabledModels: enabledModels === null ? null : [...new Set(enabledModels)],
     disableSubagents: candidate.disableSubagents !== false,
     hideBbToolsOutsideBb: candidate.hideBbToolsOutsideBb !== false,
+    reportGoUsage: candidate.reportGoUsage === true,
   };
 }

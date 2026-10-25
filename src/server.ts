@@ -19,6 +19,7 @@ import {
   type ModelSummary,
 } from "./settings-contract.ts";
 import { normalizeModelSettings } from "./model-settings.ts";
+import { registerGoUsageSource } from "./usage-source.ts";
 
 const PROVIDER_ID = "opencode2";
 const SETTINGS_KEY = "model-settings";
@@ -92,7 +93,20 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const host = bb.hosts.experimental_client({ contract: opencodeHostContract });
   const syncedSettings = new Map<string, string>();
-  connection.onChange(() => syncedSettings.clear());
+  const goUsage = registerGoUsageSource(bb, {
+    enabled: () => modelSettings.reportGoUsage,
+    async load(hostId, signal) {
+      await syncSettings([hostId], signal);
+      signal.throwIfAborted();
+      if (!modelSettings.reportGoUsage)
+        throw new Error("OpenCode Go usage is disabled.");
+      return host.call("getGoUsage", {}, { hostId, signal });
+    },
+  });
+  connection.onChange(() => {
+    syncedSettings.clear();
+    goUsage.clear();
+  });
 
   async function connectedHostIds(signal?: AbortSignal) {
     return (await bb.sdk.hosts.list({ signal }))
@@ -284,6 +298,7 @@ export default async function plugin(bb: BbPluginApi) {
     getStatus,
     async saveSettings(next) {
       modelSettings = normalizeModelSettings(next);
+      if (!modelSettings.reportGoUsage) goUsage.clear();
       await bb.storage.kv.set(SETTINGS_KEY, modelSettings);
       await syncSettings();
       bb.realtime.publish("settings-changed", modelSettings);
