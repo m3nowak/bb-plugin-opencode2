@@ -302,7 +302,7 @@ export function SettingsSection() {
         <div className="flex flex-col gap-4">
           <SettingRow
             title="Report OpenCode Go usage"
-            description="Show Go subscription limits and reset times in BB's usage panel. Reads the account connected in OpenCode on each host; the same workspace appears once. No prepaid balance is reported. Off by default."
+            description="Show Go subscription limits and reset times in BB's usage panel, grouped by machine. Reads the OpenCode Console sign-in on each host and asks opencode.ai directly. No prepaid balance is reported. Off by default."
             checked={settings?.reportGoUsage === true}
             disabled={busy}
             label="Report OpenCode Go usage"

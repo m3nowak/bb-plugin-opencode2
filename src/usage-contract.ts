@@ -63,13 +63,6 @@ export const usageMeasurementSchema = z
   })
   .strict();
 
-export const goUsageSnapshotSchema = z
-  .object({
-    label: z.string().min(1).nullable(),
-    measurement: usageMeasurementSchema,
-  })
-  .strict();
-
 export const LIST_USAGE_RESOURCES = "provider-usage.v1.listResources";
 export const GET_USAGE_RESOURCE = "provider-usage.v1.getResource";
 export const usageSourceContract = defineRpcContract({
@@ -101,7 +94,7 @@ export const usageSourceContract = defineRpcContract({
       })
       .strict(),
     experimental_description:
-      "Lists OpenCode Go resources on connected hosts from local metadata only. Does not fetch usage. Accounts share one display group and are deduplicated by workspace identity.",
+      "Lists one OpenCode v2 resource per machine whose provider reports usage. Reads local metadata only; never fetches usage. Machines group their own resources.",
   },
   [GET_USAGE_RESOURCE]: {
     input: z
@@ -109,26 +102,8 @@ export const usageSourceContract = defineRpcContract({
       .strict(),
     output: usageMeasurementSchema,
     experimental_description:
-      "Returns usage for one host's OpenCode workspace. A false refresh permits a measurement cached for 60 seconds; true requests a fresh attempt. Collection failures are usage states, not zero usage.",
+      "Returns OpenCode Go usage for one machine's OpenCode Console sign-in. A false refresh permits a measurement cached for 60 seconds; true requests a fresh attempt. Collection failures are usage states, not zero usage.",
   },
 });
 
 export type UsageMeasurement = z.infer<typeof usageMeasurementSchema>;
-export type GoUsageSnapshot = z.infer<typeof goUsageSnapshotSchema>;
-
-export function unavailableGoUsage(message: string): GoUsageSnapshot {
-  return {
-    label: null,
-    measurement: {
-      accountKey: null,
-      observedAt: null,
-      usage: {
-        status: "error",
-        plan: null,
-        accountEmail: null,
-        planLabel: null,
-        message,
-      },
-    },
-  };
-}

@@ -53,6 +53,7 @@ import {
   installationStatus,
   providerHealth,
 } from "./maintenance.ts";
+import { readGoUsage } from "./go-usage.ts";
 import { openCodeServer } from "./opencode-server.ts";
 import { promptBody } from "./prompt.ts";
 import {
@@ -90,6 +91,7 @@ const PARAM_SCHEMAS = {
   initialize: initializeParamsSchema,
   "model/list": modelListParamsSchema,
   "provider/health": providerMaintenanceParamsSchema,
+  "provider/usage": providerMaintenanceParamsSchema,
   "provider/installation/status": providerInstallationStatusParamsSchema,
   "provider/installation/run": providerInstallationRunParamsSchema,
   "thread/start": threadStartParamsSchema,
@@ -191,6 +193,18 @@ async function handle(request: RecordValue) {
       });
       return;
     }
+    case "provider/usage":
+      sendResult(
+        request.id,
+        await readGoUsage({
+          settings: await openCodeServer.readModelSettings(
+            params.providerOptions,
+          ),
+          connection: await openCodeServer.readConnectionSettings(),
+          request: (path, init) => openCodeServer.request(path, init),
+        }),
+      );
+      return;
     case "provider/installation/status":
       sendResult(
         request.id,

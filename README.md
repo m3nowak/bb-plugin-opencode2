@@ -103,14 +103,15 @@ service discovery behavior.
 - **Status** shows each connected host's OpenCode version, available updates,
   and model count, with the command to run when something is missing.
 - **Report OpenCode Go usage** is off by default. When enabled, BB's usage
-  panel shows the connected Console workspace's five-hour, weekly, and monthly
-  Go allowance and reset times. Accounts from all connected hosts appear in one
-  OpenCode Go group, deduplicated by workspace ID. Data is fetched on demand,
-  cached for up to 60 seconds, and refreshed by the panel's reload action.
-  Turning it off clears the cache and stops collection. Requires OpenCode's
-  experimental usage-limits API and a Console workspace connection; an older
-  server or missing sign-in produces a status instead of zero usage. Prepaid
-  balance and Console budgets are not reported. No new credentials are stored.
+  panel shows the five-hour, weekly, and monthly Go allowance and reset times
+  under OpenCode v2 in each machine's group, like Codex and Claude Code. Each
+  host reads its OpenCode Console sign-in from its OpenCode instance and asks
+  `https://opencode.ai/zen/go/v1/usage` directly; the token goes nowhere else
+  and is never stored. Data is fetched on demand, cached for up to 60 seconds,
+  and refreshed by the panel's reload action. A missing Console sign-in shows
+  the sign-in hint, an expired one the reconnect hint, and a workspace without
+  Go hides the row. With an existing local instance, only the BB server
+  machine reports usage. Prepaid balance and Console budgets are not reported.
 - **Show in the provider picker** enables or hides the provider.
 - **Allow OpenCode subagents** lets OpenCode use its native subagents (off by
   default).

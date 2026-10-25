@@ -32,7 +32,7 @@ src/
   settings-contract.ts Settings and RPC shapes shared by server, host, and app
   model-settings.ts    Model allowlist normalization
   usage-contract.ts    Discoverable provider-usage.v1 wire contract
-  usage-source.ts      Opt-in usage source, per-host cache and shared account group
+  usage-source.ts      Opt-in host-scoped usage source and per-machine cache
   host/                Host implementation, described below
 tests/                 Node tests, plus a jsdom test for the settings UI
 skills/                Agent skill shipped with the plugin
@@ -51,7 +51,8 @@ Inside `src/host/`:
 - `session-manager.ts` owns session setup, per-turn preparation (settings,
   permissions, plan mode, model), MCP registration, and shutdown.
 - `maintenance.ts` implements health, install, and update.
-- `go-usage.ts` reads OpenCode's optional usage-limits API and maps Go meters.
+- `go-usage.ts` answers `provider/usage`: it reads the Console sign-in from
+  OpenCode and Go meters from opencode.ai.
 - `dynamic-tools-mcp.ts` and `bridge-runtime.ts` expose BB dynamic tools to
   OpenCode and route their calls back.
 - `opencode-config.ts` maintains the global deny rule that keeps BB's tools out
@@ -93,15 +94,30 @@ Inside `src/host/`:
 
 ## Go subscription usage
 
-Go usage is a discoverable plugin RPC source rather than a provider bridge
-maintenance capability. Inventory reads connected-host metadata and previously
-observed account IDs only. Collection reads exactly one host through host RPC.
-All resources use shared display scope so BB deduplicates account IDs across
-hosts, even on the first collection. Unknown identities remain separate.
+Go usage follows BB's own Codex and Claude Code providers, so the usage panel
+groups it by machine instead of adding a separate tab. The provider declares
+`maintenance.usage`, and the bridge answers `provider/usage`. A discoverable
+`provider-usage.v1` source lists one host-scoped resource per machine whose
+provider reports usage, with no shared label, and reads it through
+`bb.sdk.system.usageLimits`.
+
+The bridge reads the active `opencode` credential from the configured
+instance's `GET /api/credential` and calls `https://opencode.ai/zen/go/v1/usage`
+with it. The token never goes to another origin, so a credential for another
+Console server is an error. Stable OpenCode 2.1.x has no usage-limits route;
+the dev-only `/api/experimental/usage/limits` is not used.
+
+BB's panel discards `error` results from sources and shows only a generic
+failure, so expected states map to statuses it renders: no sign-in is
+`unauthenticated`, an expired token or HTTP 401 is `expired`, and HTTP 403 (no
+Go subscription) is `not_installed`, which hides the row. A machine the bridge
+reports as unsupported (opt-in off, provider disabled, or a custom instance
+without its password) is also `not_installed`.
+
 Cache entries are successful measurements for at most 60 seconds; a failed
-refresh reports an error, not cached percentages. Disabling clears observations
-and invalidates in-flight results; the host also aborts its active usage request.
-Connection changes clear observations too. No usage polling service is added.
+refresh reports an error, not cached percentages. Disabling or changing the
+connection clears observations and invalidates in-flight results. No usage
+polling service is added.
 
 ## Known gaps
 

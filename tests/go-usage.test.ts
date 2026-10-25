@@ -1,145 +1,223 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { GoUsageReader, mapGoUsage } from "../src/host/go-usage.ts";
+import { providerUsageResultSchema } from "@get-bb/plugin-sdk/provider-bridge";
+import { DEFAULT_CONNECTION_SETTINGS } from "../src/connection-settings.ts";
+import {
+  consoleCredential,
+  GO_USAGE_URL,
+  readGoUsage,
+} from "../src/host/go-usage.ts";
 import { DEFAULT_MODEL_SETTINGS } from "../src/model-settings.ts";
 import plugin from "../src/server.ts";
 import {
   GET_USAGE_RESOURCE,
   LIST_USAGE_RESOURCES,
-  unavailableGoUsage,
   usageMeasurementSchema,
   usageSourceContract,
-  type GoUsageSnapshot,
 } from "../src/usage-contract.ts";
 import { registerGoUsageSource } from "../src/usage-source.ts";
 
-function limits(workspace = "ws-a", percent = 25) {
-  const meter = { percent, limited: false, resetsAt: 1_800_000_000_000 };
+const TOKEN = "console-access-token";
+const SETTINGS = { ...DEFAULT_MODEL_SETTINGS, reportGoUsage: true };
+
+function credentials(overrides: Record<string, unknown> = {}) {
   return {
-    location: { directory: "/home/example" },
-    data: {
-      workspace: {
-        id: workspace,
-        name: "Personal",
-        usageURL: "https://opencode.ai/console",
+    data: [
+      {
+        integrationID: "opencode-go",
+        active: true,
+        value: { type: "key", key: "go-key" },
       },
-      go: {
-        rolling: meter,
-        weekly: { ...meter, percent: 60 },
-        monthly: { ...meter, percent: 90 },
+      {
+        integrationID: "opencode",
+        active: false,
+        value: { type: "oauth", access: "stale", expires: 0 },
       },
-      budgets: [{ limit: 100, spent: 10 }],
+      {
+        integrationID: "opencode",
+        active: true,
+        value: {
+          type: "oauth",
+          methodID: "device",
+          access: TOKEN,
+          refresh: "refresh-token",
+          expires: 2_000_000_000_000,
+          metadata: {
+            server: "https://opencode.ai/console",
+            email: "member@example.com",
+            orgID: "wrk_a",
+            orgName: "Personal",
+          },
+          ...overrides,
+        },
+      },
+    ],
+  };
+}
+
+function goUsage(percent = 25) {
+  const meter = {
+    status: "ok",
+    percent,
+    resetsAt: "2027-01-15T08:00:00.000Z",
+  };
+  return {
+    usage: {
+      rolling: meter,
+      weekly: { ...meter, percent: 60 },
+      monthly: { ...meter, status: "rate-limited", percent: 97 },
     },
   };
 }
 
-test("maps the published Go meters without inferring budget, balance, or plan tier", () => {
-  const result = mapGoUsage(limits(), 1234);
-  const measurement = usageMeasurementSchema.parse(result.measurement);
-  assert.equal(measurement.accountKey, "opencode.ai:workspace:ws-a");
-  assert.equal(measurement.observedAt, 1234);
-  assert.equal(measurement.usage.status, "ok");
-  if (measurement.usage.status !== "ok") return;
-  assert.equal(measurement.usage.plan, null);
+function fixture(options: {
+  credential?: unknown;
+  status?: number;
+  body?: unknown;
+}) {
+  const paths: string[] = [];
+  const fetches: { url: string; init: RequestInit }[] = [];
+  return {
+    paths,
+    fetches,
+    read: (overrides: Partial<Parameters<typeof readGoUsage>[0]> = {}) =>
+      readGoUsage({
+        settings: SETTINGS,
+        connection: DEFAULT_CONNECTION_SETTINGS,
+        now: 1_800_000_000_000,
+        request: async (path) => {
+          paths.push(path);
+          if (options.credential instanceof Error) throw options.credential;
+          return options.credential ?? credentials();
+        },
+        fetch: async (url, init) => {
+          fetches.push({ url: String(url), init: init! });
+          if (options.status === 0) throw new Error(`network ${TOKEN}`);
+          return new Response(JSON.stringify(options.body ?? goUsage()), {
+            status: options.status ?? 200,
+          });
+        },
+        ...overrides,
+      }),
+  };
+}
+
+test("picks the active Console sign-in and maps the retired Console host", () => {
+  assert.deepEqual(consoleCredential(credentials()), {
+    token: TOKEN,
+    expires: 2_000_000_000_000,
+    server: "https://opencode.ai/console",
+    orgID: "wrk_a",
+    email: "member@example.com",
+  });
+  assert.equal(
+    consoleCredential(
+      credentials({ metadata: { server: "https://console.opencode.ai" } }),
+    )?.server,
+    "https://opencode.ai/console",
+  );
+  assert.equal(
+    consoleCredential({ data: credentials().data.slice(0, 2) }),
+    null,
+  );
+  assert.equal(consoleCredential({}), null);
+});
+
+test("sends the Console token only to opencode.ai and maps Go meters to BB windows", async () => {
+  const f = fixture({});
+  const result = providerUsageResultSchema.parse(await f.read());
+  assert.deepEqual(f.paths, ["/api/credential"]);
+  assert.equal(f.fetches.length, 1);
+  assert.equal(f.fetches[0].url, GO_USAGE_URL);
+  assert.equal(f.fetches[0].init.redirect, "error");
+  assert.deepEqual(f.fetches[0].init.headers, {
+    accept: "application/json",
+    authorization: `Bearer ${TOKEN}`,
+    "x-opencode-org-id": "wrk_a",
+  });
+  assert.ok(result.supported);
+  assert.equal(result.usage.status, "ok");
+  if (result.usage.status !== "ok") return;
+  assert.equal(result.usage.accountKey, "opencode.ai:workspace:wrk_a");
+  assert.equal(result.usage.accountEmail, "member@example.com");
+  assert.equal(result.usage.planLabel, "OpenCode Go");
+  assert.equal(result.usage.plan, null);
   assert.deepEqual(
-    measurement.usage.windows.map((window) => [
-      window.id,
+    result.usage.windows.map((window) => [
       window.kind,
+      window.label,
       window.usedPercent,
+      window.resetsAt,
     ]),
     [
-      ["rolling", "five-hour", 25],
-      ["weekly", "weekly", 60],
-      ["monthly", "custom", 90],
+      ["five-hour", "Five-hour limit", 25, "2027-01-15T08:00:00.000Z"],
+      ["weekly", "Weekly limit", 60, "2027-01-15T08:00:00.000Z"],
+      // Rate-limited means Go refuses requests until the reset.
+      ["custom", "Monthly limit", 100, "2027-01-15T08:00:00.000Z"],
     ],
   );
-  assert.ok(
-    measurement.usage.windows.every(
-      (window) =>
-        window.resetsAt === "2027-01-15T08:00:00.000Z" && window.cost === null,
-    ),
-  );
+  assert.ok(!JSON.stringify(result).includes(TOKEN));
 });
 
-test("no login, no subscription and invalid data never become zero usage", () => {
-  assert.equal(
-    mapGoUsage({ data: null }).measurement.usage.status,
-    "unauthenticated",
-  );
-  const noGo = limits();
-  const noSubscription = mapGoUsage({
-    data: { workspace: noGo.data.workspace, budgets: noGo.data.budgets },
-  });
-  assert.equal(noSubscription.measurement.usage.status, "error");
-  assert.equal(
-    noSubscription.measurement.accountKey,
-    "opencode.ai:workspace:ws-a",
-  );
-  for (const value of [
-    {},
-    { data: {} },
-    limits("ws-a", -1),
-    limits("ws-a", 101),
+test("opt-in, disabled provider and password-less custom hosts report unsupported without requests", async () => {
+  const f = fixture({});
+  for (const overrides of [
+    { settings: DEFAULT_MODEL_SETTINGS },
+    { settings: { ...SETTINGS, providerEnabled: false } },
     {
-      data: {
-        ...noGo.data,
-        go: {
-          ...noGo.data.go,
-          rolling: { percent: 10, limited: false, resetsAt: 1e20 },
-        },
+      connection: {
+        ...DEFAULT_CONNECTION_SETTINGS,
+        mode: "custom" as const,
+        password: "",
       },
     },
-  ]) {
-    const result = mapGoUsage(value).measurement;
-    assert.equal(result.usage.status, "error");
-    assert.equal(result.observedAt, null);
-    assert.ok(!("windows" in result.usage));
-  }
+  ])
+    assert.deepEqual(await f.read(overrides), { supported: false });
+  assert.equal(f.paths.length, 0);
+  assert.equal(f.fetches.length, 0);
 });
 
-test("reader uses only the configured OpenCode API and sanitizes errors", async () => {
-  const reader = new GoUsageReader();
-  const good = await reader.read(async (path, init) => {
-    assert.equal(path, "/api/experimental/usage/limits");
-    assert.ok(init.signal);
-    assert.equal(init.headers, undefined);
-    return limits();
-  });
-  assert.equal(good.measurement.usage.status, "ok");
-  for (const message of [
-    "OpenCode API 404: secret-body",
-    "OpenCode API 503: secret-body",
-    "secret-body",
-  ]) {
-    const result = await reader.read(async () => {
-      throw new Error(message);
-    });
-    assert.equal(result.measurement.usage.status, "error");
-    assert.ok(!JSON.stringify(result).includes("secret-body"));
-    if (message.includes("404"))
-      assert.match(JSON.stringify(result), /Update OpenCode/);
-  }
-});
-
-test("clearing the reader aborts in-flight work and rejects late successful data", async () => {
-  const reader = new GoUsageReader();
-  let resolve!: (value: unknown) => void;
-  let signal!: AbortSignal;
-  const request = reader.read(async (_path, init) => {
-    signal = init.signal!;
-    return new Promise((done) => {
-      resolve = done;
-    });
-  });
-  reader.clear();
-  assert.equal(signal.aborted, true);
-  resolve(limits());
-  assert.equal((await request).measurement.usage.status, "error");
-  assert.equal(
-    (await reader.read(async () => limits())).measurement.usage.status,
-    "ok",
+test("maps sign-in, expiry, subscription and failure states without leaking secrets", async () => {
+  const status = async (
+    options: Parameters<typeof fixture>[0],
+    expected: string,
+    fetched = true,
+  ) => {
+    const f = fixture(options);
+    const result = await f.read();
+    assert.ok(result.supported);
+    assert.equal(result.usage.status, expected, JSON.stringify(options));
+    assert.equal(f.fetches.length, fetched ? 1 : 0);
+    assert.ok(!JSON.stringify(result).includes(TOKEN));
+    assert.ok(!JSON.stringify(result).includes("private-body"));
+    providerUsageResultSchema.parse(result);
+  };
+  await status({ credential: { data: [] } }, "unauthenticated", false);
+  await status(
+    { credential: credentials({ expires: 1_700_000_000_000 }) },
+    "expired",
+    false,
   );
+  await status(
+    { credential: new Error(`OpenCode API 500: private-body ${TOKEN}`) },
+    "error",
+    false,
+  );
+  await status(
+    {
+      credential: credentials({
+        metadata: { server: "https://console.example.com" },
+      }),
+    },
+    "error",
+    false,
+  );
+  await status({ status: 401 }, "expired");
+  await status({ status: 403 }, "not_installed");
+  await status({ status: 503, body: "private-body" }, "error");
+  await status({ status: 0 }, "error");
+  await status({ body: { usage: { rolling: {} } } }, "error");
 });
 
 function sourceFixture() {
@@ -147,34 +225,92 @@ function sourceFixture() {
   let hosts = [
     { id: "a", name: "Laptop", status: "connected" },
     { id: "b", name: "Desktop", status: "connected" },
-    { id: "c", name: "Other", status: "connected" },
-    { id: "offline", name: "Offline", status: "disconnected" },
+    { id: "c", name: "No OpenCode", status: "connected" },
   ];
-  let loads = 0;
-  let load: (
-    hostId: string,
-    signal: AbortSignal,
-  ) => Promise<GoUsageSnapshot> = async (hostId) => {
-    loads++;
-    return mapGoUsage(limits(hostId === "c" ? "ws-b" : "ws-a"));
-  };
+  const calls: { hostId: string; refresh: boolean }[] = [];
+  let usage: (hostId: string) => Promise<Record<string, unknown>> = async (
+    hostId,
+  ) => ({
+    opencode2: {
+      status: "ok",
+      accountKey: `opencode.ai:workspace:${hostId === "b" ? "wrk_b" : "wrk_a"}`,
+      accountEmail: "member@example.com",
+      planLabel: "OpenCode Go",
+      plan: null,
+      windows: [
+        {
+          kind: "five-hour",
+          label: "Five-hour limit",
+          usedPercent: 25,
+          resetsAt: "2027-01-15T08:00:00.000Z",
+          model: null,
+        },
+        {
+          kind: "bogus",
+          label: "Monthly limit",
+          usedPercent: 90,
+          resetsAt: null,
+        },
+      ],
+    },
+  });
   const { bb, harness } = createFakePluginHost({
     pluginId: "opencode2",
-    sdk: { hosts: { list: async () => hosts } },
+    sdk: {
+      hosts: {
+        list: async () => hosts,
+        get: async ({ hostId }: { hostId: string }) => {
+          const host = hosts.find((item) => item.id === hostId);
+          if (!host)
+            throw Object.assign(new Error("not found"), { status: 404 });
+          return host;
+        },
+      },
+      providers: {
+        list: async ({ hostId }: { hostId: string }) =>
+          hostId === "c"
+            ? [
+                {
+                  id: "codex",
+                  pluginId: "provider-codex",
+                  displayName: "Codex",
+                },
+              ]
+            : [
+                {
+                  id: "opencode2",
+                  pluginId: "opencode2",
+                  displayName: "OpenCode v2",
+                },
+              ],
+      },
+      system: {
+        usageLimits: async ({
+          hostId,
+          refresh,
+        }: {
+          hostId: string;
+          refresh: boolean;
+        }) => {
+          calls.push({ hostId, refresh });
+          return usage(hostId);
+        },
+      },
+    } as never,
   });
   const source = registerGoUsageSource(bb, {
+    providerId: "opencode2",
     enabled: () => enabled,
-    load: (id, signal) => load(id, signal),
   });
   return {
     harness,
     source,
-    loads: () => loads,
+    calls,
     enable: (value: boolean) => {
       enabled = value;
     },
-    setLoad: (fn: typeof load) => {
-      load = fn;
+    setUsage: (fn: typeof usage) => {
+      usage = fn;
     },
     disconnect: () => {
       hosts = hosts.map((host) => ({ ...host, status: "disconnected" }));
@@ -183,188 +319,143 @@ function sourceFixture() {
       usageSourceContract[LIST_USAGE_RESOURCES].output.parse(
         await harness.callRpc(LIST_USAGE_RESOURCES, {}),
       ),
-    get: async (id = "a", refresh = false) =>
+    get: async (hostId = "a", refresh = false) =>
       usageMeasurementSchema.parse(
-        await harness.callRpc(GET_USAGE_RESOURCE, { resourceId: id, refresh }),
+        await harness.callRpc(GET_USAGE_RESOURCE, {
+          resourceId: JSON.stringify([hostId, "opencode2"]),
+          refresh,
+        }),
       ),
   };
 }
 
-test("inventory is metadata-only and shared account identities deduplicate across hosts", async () => {
+test("lists one host-scoped resource per machine with the provider, like BB's own providers", async () => {
   const f = sourceFixture();
-  const initial = await f.list();
-  assert.equal(initial.resources.length, 3);
-  assert.equal(f.loads(), 0);
-  assert.ok(
-    initial.resources.every(
-      (resource) =>
-        resource.accountKey === null && resource.scope.kind === "shared",
-    ),
-  );
+  const listed = await f.list();
+  assert.equal(listed.label, undefined);
+  assert.deepEqual(listed.resources, [
+    {
+      id: JSON.stringify(["a", "opencode2"]),
+      accountKey: null,
+      providerId: "opencode2",
+      label: "OpenCode v2",
+      scope: { kind: "host", hostId: "a", hostName: "Laptop" },
+    },
+    {
+      id: JSON.stringify(["b", "opencode2"]),
+      accountKey: null,
+      providerId: "opencode2",
+      label: "OpenCode v2",
+      scope: { kind: "host", hostId: "b", hostName: "Desktop" },
+    },
+  ]);
+  assert.equal(f.calls.length, 0);
   assert.deepEqual(
     f.harness.inspection.registrations.experimental_publishedRpcMethods.map(
       (method) => method.method,
     ),
     [LIST_USAGE_RESOURCES, GET_USAGE_RESOURCE],
   );
-  const measurements = await Promise.all(
-    initial.resources.map((resource) => f.get(resource.id)),
-  );
-  // BB groups by display scope, then selects one resource per provider/accountKey.
+  await f.get("a");
   assert.equal(
-    new Set(measurements.map((measurement) => measurement.accountKey)).size,
-    2,
+    (await f.list()).resources[0].accountKey,
+    "opencode.ai:workspace:wrk_a",
   );
-  const known = await f.list();
-  assert.equal(f.loads(), 3);
-  assert.equal(known.resources[0].accountKey, known.resources[1].accountKey);
-  assert.notEqual(known.resources[0].accountKey, known.resources[2].accountKey);
-  assert.equal(known.resources[0].label, known.resources[2].label); // Same name is not identity.
+  f.enable(false);
+  assert.deepEqual(await f.list(), { resources: [] });
 });
 
-test("cache lasts 60 seconds, manual refresh bypasses it, and changed workspaces replace identity", async (t) => {
+test("adapts BB's provider usage and caches successful reads for 60 seconds", async (t) => {
   const f = sourceFixture();
   const now = Date.now();
   t.mock.method(Date, "now", () => now);
+  const result = await f.get();
+  assert.equal(result.observedAt, now);
+  assert.equal(result.usage.status, "ok");
+  if (result.usage.status !== "ok") return;
+  assert.equal(result.usage.accountEmail, "member@example.com");
+  assert.deepEqual(
+    result.usage.windows.map((window) => [window.id, window.kind, window.cost]),
+    [
+      ["0:Five-hour limit", "five-hour", null],
+      ["1:Monthly limit", "custom", null],
+    ],
+  );
   await f.get();
-  await f.get();
-  assert.equal(f.loads(), 1);
+  assert.equal(f.calls.length, 1);
   await f.get("a", true);
-  assert.equal(f.loads(), 2);
+  assert.deepEqual(f.calls[1], { hostId: "a", refresh: true });
   t.mock.method(Date, "now", () => now + 60_001);
   await f.get();
-  assert.equal(f.loads(), 3);
-  f.setLoad(async () => mapGoUsage(limits("new-workspace")));
-  const changed = await f.get("a", true);
-  assert.equal(changed.accountKey, "opencode.ai:workspace:new-workspace");
-  assert.equal((await f.list()).resources[0].accountKey, changed.accountKey);
+  assert.equal(f.calls.length, 3);
 });
 
-test("failed refresh reports a status, not stale percentages, and unknown accounts stay separate", async () => {
+test("unsupported machines are hidden, and failures are states rather than zero usage", async () => {
   const f = sourceFixture();
-  await f.get();
-  f.setLoad(async () => {
+  f.setUsage(async () => ({}));
+  assert.equal((await f.get()).usage.status, "not_installed");
+  f.setUsage(async () => ({
+    opencode2: { status: "expired", accountKey: "opencode.ai:workspace:wrk_a" },
+  }));
+  const expired = await f.get("a", true);
+  assert.equal(expired.usage.status, "expired");
+  assert.equal(expired.accountKey, "opencode.ai:workspace:wrk_a");
+  f.setUsage(async () => {
     throw new Error("private detail");
   });
-  const result = await f.get("a", true);
-  assert.equal(result.usage.status, "error");
-  assert.equal(result.observedAt, null);
-  assert.ok(!("windows" in result.usage));
-  assert.ok(!JSON.stringify(result).includes("private detail"));
-  assert.equal((await f.list()).resources[0].accountKey, null);
-  f.setLoad(async () => unavailableGoUsage("Unavailable"));
-  assert.equal((await f.get("b")).accountKey, null);
-  assert.equal((await f.list()).resources.length, 3);
+  const failed = await f.get("a", true);
+  assert.equal(failed.usage.status, "error");
+  assert.ok(!JSON.stringify(failed).includes("private detail"));
+  f.disconnect();
+  assert.match(
+    JSON.stringify(await f.get("a", true)),
+    /Machine is disconnected/,
+  );
 });
 
-test("disabling hides inventory, clears cache and prevents late data from returning", async () => {
+test("invented and foreign resources never reach a provider", async () => {
   const f = sourceFixture();
-  await f.get();
-  let resolve!: (snapshot: GoUsageSnapshot) => void;
-  let started!: () => void;
-  let signal!: AbortSignal;
-  const ready = new Promise<void>((done) => {
-    started = done;
-  });
-  f.setLoad(async (_hostId, callerSignal) => {
-    signal = callerSignal;
-    started();
-    return new Promise((done) => {
-      resolve = done;
-    });
-  });
-  const loading = f.get("a", true);
-  await ready;
+  for (const resourceId of [
+    "a",
+    JSON.stringify(["a", "codex"]),
+    JSON.stringify(["missing", "opencode2"]),
+    JSON.stringify(["c", "opencode2"]),
+  ])
+    await assert.rejects(
+      f.harness.callRpc(GET_USAGE_RESOURCE, { resourceId, refresh: true }),
+      /no longer exists/,
+    );
   f.enable(false);
-  f.source.clear();
-  assert.equal(signal.aborted, true);
-  assert.deepEqual(await f.list(), { resources: [] });
-  await assert.rejects(f.get(), /disabled/);
-  const rejected = assert.rejects(loading, /configuration changed/);
-  resolve(mapGoUsage(limits()));
-  await rejected;
-  f.enable(true);
-  assert.equal((await f.list()).resources[0].accountKey, null);
-  f.setLoad(async () => mapGoUsage(limits("new")));
-  assert.equal((await f.get()).accountKey, "opencode.ai:workspace:new");
+  await assert.rejects(f.get(), /no longer exists/);
+  assert.equal(f.calls.length, 0);
 });
 
-test("a queued forced refresh cannot restart collection after disable and re-enable", async () => {
+test("disabling during a read drops late data, and concurrent reads coalesce", async () => {
   const f = sourceFixture();
-  let resolve!: (snapshot: GoUsageSnapshot) => void;
-  let calls = 0;
-  f.setLoad(async () => {
-    calls++;
-    return new Promise((done) => {
-      resolve = done;
-    });
-  });
-  const loading = f.get();
-  const queued = f.get("a", true);
-  await new Promise((done) => setImmediate(done));
-  f.enable(false);
-  f.source.clear();
-  f.enable(true);
-  const rejected = [
-    assert.rejects(loading, /configuration changed/),
-    assert.rejects(queued, /configuration changed/),
-  ];
-  resolve(mapGoUsage(limits()));
-  await Promise.all(rejected);
-  assert.equal(calls, 1);
-  assert.equal((await f.list()).resources[0].accountKey, null);
-});
-
-test("host clock skew cannot extend the local cache beyond 60 seconds", async (t) => {
-  const f = sourceFixture();
-  const now = Date.now();
-  let calls = 0;
-  f.setLoad(async () => {
-    calls++;
-    return mapGoUsage(limits(), now + 86_400_000);
-  });
-  t.mock.method(Date, "now", () => now);
-  await f.get();
-  await f.get();
-  assert.equal(calls, 1);
-  t.mock.method(Date, "now", () => now + 60_001);
-  await f.get();
-  assert.equal(calls, 2);
-});
-
-test("concurrent reads coalesce, but a forced refresh waits for a cached attempt then reloads", async () => {
-  const f = sourceFixture();
-  let resolve!: (snapshot: GoUsageSnapshot) => void;
-  let calls = 0;
-  f.setLoad(async () => {
-    calls++;
-    if (calls === 1)
-      return new Promise((done) => {
+  let resolve!: (value: Record<string, unknown>) => void;
+  f.setUsage(
+    () =>
+      new Promise((done) => {
         resolve = done;
-      });
-    return mapGoUsage(limits("fresh"));
-  });
+      }),
+  );
   const first = f.get();
   const second = f.get();
-  const forced = f.get("a", true);
   await new Promise((done) => setImmediate(done));
-  assert.equal(calls, 1);
-  resolve(mapGoUsage(limits("old")));
-  assert.deepEqual(await first, await second);
-  assert.equal((await forced).accountKey, "opencode.ai:workspace:fresh");
-  assert.equal(calls, 2);
+  assert.equal(f.calls.length, 1);
+  f.enable(false);
+  f.source.clear();
+  f.enable(true);
+  const rejected = Promise.all([
+    assert.rejects(first, /configuration changed/),
+    assert.rejects(second, /configuration changed/),
+  ]);
+  resolve({ opencode2: { status: "unauthenticated" } });
+  await rejected;
+  assert.equal((await f.list()).resources[0].accountKey, null);
 });
 
-test("disconnected and invented resources cannot trigger a provider request", async () => {
-  const f = sourceFixture();
-  await assert.rejects(f.get("invented"), /no longer exists/);
-  f.disconnect();
-  assert.equal((await f.list()).resources.length, 0);
-  await assert.rejects(f.get(), /no longer exists/);
-  assert.equal(f.loads(), 0);
-});
-
-test("plugin defaults to no collection, syncs opt-in to hosts, and forgets accounts when disabled", async () => {
+test("plugin reports usage through BB's provider maintenance and stays opt-in", async () => {
   const { bb, harness } = createFakePluginHost({
     pluginId: "opencode2",
     experimental_hostEntry: true,
@@ -372,52 +463,35 @@ test("plugin defaults to no collection, syncs opt-in to hosts, and forgets accou
       hosts: {
         list: async () => [{ id: "a", name: "Laptop", status: "connected" }],
       },
-    },
-    experimental_callHostRpc: async ({ method }) =>
-      method === "getGoUsage" ? mapGoUsage(limits()) : { ok: true },
+      providers: {
+        list: async () => [
+          {
+            id: "opencode2",
+            pluginId: "opencode2",
+            displayName: "OpenCode v2",
+          },
+        ],
+      },
+    } as never,
+    experimental_callHostRpc: async () => ({ ok: true }),
   });
   await plugin(bb);
+  const provider = harness.inspection.registrations.providerRegistrations.find(
+    (registration) => registration.id === "opencode2",
+  );
+  assert.equal(provider?.maintenance?.usage, true);
   assert.deepEqual(await harness.callRpc(LIST_USAGE_RESOURCES, {}), {
     resources: [],
   });
-  await assert.rejects(
-    harness.callRpc(GET_USAGE_RESOURCE, { resourceId: "a", refresh: true }),
-    /disabled/,
-  );
-  assert.equal(harness.experimental_hostRpcCalls.length, 0);
-  await harness.callRpc("saveSettings", {
-    ...DEFAULT_MODEL_SETTINGS,
-    reportGoUsage: true,
-  });
-  const result = usageMeasurementSchema.parse(
-    await harness.callRpc(GET_USAGE_RESOURCE, {
-      resourceId: "a",
-      refresh: false,
-    }),
-  );
-  assert.equal(result.usage.status, "ok");
+  await harness.callRpc("saveSettings", SETTINGS);
   assert.deepEqual(
-    harness.experimental_hostRpcCalls.map((call) => call.method),
-    ["configureConnection", "setModelSettings", "getGoUsage"],
+    usageSourceContract[LIST_USAGE_RESOURCES].output
+      .parse(await harness.callRpc(LIST_USAGE_RESOURCES, {}))
+      .resources.map((resource) => resource.scope),
+    [{ kind: "host", hostId: "a", hostName: "Laptop" }],
   );
-  await harness.setSettings({ serverUrl: "http://127.0.0.1:4999" });
-  assert.equal(
-    usageSourceContract[LIST_USAGE_RESOURCES].output.parse(
-      await harness.callRpc(LIST_USAGE_RESOURCES, {}),
-    ).resources[0].accountKey,
-    null,
-  );
-  await harness.callRpc("saveSettings", {
-    ...DEFAULT_MODEL_SETTINGS,
-    reportGoUsage: false,
-  });
+  await harness.callRpc("saveSettings", DEFAULT_MODEL_SETTINGS);
   assert.deepEqual(await harness.callRpc(LIST_USAGE_RESOURCES, {}), {
     resources: [],
   });
-  assert.equal(
-    harness.experimental_hostRpcCalls.filter(
-      (call) => call.method === "getGoUsage",
-    ).length,
-    1,
-  );
 });

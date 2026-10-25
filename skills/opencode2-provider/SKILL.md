@@ -43,8 +43,9 @@ the plugin settings page or `saveSettings` with the full object:
   Turning it off removes the rule (restoring the file exactly if untouched).
   OpenCode applies config changes on its next idle location reload.
 - `reportGoUsage` defaults to `false`. Enable it to report Go allowance and
-  reset times in BB's usage panel. See [provider settings](../../README.md#provider-settings)
-  for API requirements, account deduplication, and refresh behavior.
+  reset times in BB's usage panel, under each machine. It needs an OpenCode
+  Console sign-in (`opencode2 auth login`). See [provider settings](../../README.md#provider-settings)
+  for the data source, statuses, and refresh behavior.
 
 Settings apply from the next turn.
 

@@ -30,11 +30,10 @@ patches.
 
 - Native OpenCode subagents are off by default, so agents delegate through BB.
   Turn them on in the plugin settings and they appear as nested delegation rows.
-- Go subscription limits and reset times can appear in BB's usage panel. Enable
-  **Report OpenCode Go usage** in settings. It is off by default and requires
-  OpenCode's experimental usage-limits API and a connected Console workspace.
-  Accounts from all connected hosts are shown once per workspace. Prepaid
-  balance is not reported.
+- Go subscription limits and reset times can appear in BB's usage panel,
+  grouped by machine like Codex and Claude Code. Enable **Report OpenCode Go
+  usage** in settings. It is off by default and needs an OpenCode Console
+  sign-in in OpenCode. Prepaid balance is not reported.
 - By default the plugin adds one deny rule to your global OpenCode config so
   BB threads' tools do not show up in OpenCode's own sessions. You can turn this
   off in settings, which restores the file.
